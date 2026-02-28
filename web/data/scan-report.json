@@ -1,76 +1,40 @@
 {
   "refreshMs": 20000,
   "systemStatus": "ONLINE",
-  "health": 94,
-  "cpu": "32%",
-  "memory": "64%",
+  "health": 10,
+  "cpu": "--",
+  "memory": "--",
   "frameworks": [
-    { "name": "NIST AI RMF", "enabled": true },
-    { "name": "EU AI Act", "enabled": true },
-    { "name": "ISO 42001", "enabled": true },
-    { "name": "GDPR", "enabled": false }
+    { "name": "Mandate 2.x", "enabled": true },
+    { "name": "Static Eval", "enabled": true },
+    { "name": "Code Eval", "enabled": true },
+    { "name": "Runtime Evidence", "enabled": false }
   ],
-  "repo": "neural-net-v2",
-  "ref": "HEAD:main",
-  "reportId": "NG-9921-X",
-  "status": "CRITICAL FAILURE",
-  "severity": "critical",
-  "result": "COMPLIANCE_VIOLATION",
-  "action": "IMMEDIATE_ACTION_REQUIRED",
-  "timestampUtc": "2023-10-27_14:32:09",
-  "passRate": 64,
-  "success": 91,
-  "fail": 8,
+  "repo": "unknown-repo",
+  "ref": "HEAD:default",
+  "reportId": "PENDING",
+  "sessionId": "PENDING",
+  "status": "AWAITING SCAN RESULTS",
+  "severity": "warning",
+  "result": "PENDING_SUMMARY",
+  "action": "WAIT_OR_RETRY",
+  "timestampUtc": "--",
+  "passRate": 0,
+  "success": 0,
+  "fail": 0,
+  "review": 0,
   "severityIndex": [
-    { "label": "CRITICAL_VULN", "count": 3, "percent": 75, "severity": "critical" },
-    { "label": "HIGH_VULN", "count": 5, "percent": 45, "severity": "warning" },
-    { "label": "LOW_VULN", "count": 12, "percent": 20, "severity": "info" }
+    { "label": "CRITICAL_FAIL", "count": 0, "percent": 0, "severity": "critical" },
+    { "label": "HIGH_FAIL", "count": 0, "percent": 0, "severity": "warning" },
+    { "label": "MEDIUM_FAIL", "count": 0, "percent": 0, "severity": "info" },
+    { "label": "LOW_FAIL", "count": 0, "percent": 0, "severity": "info" },
+    { "label": "REVIEW", "count": 0, "percent": 0, "severity": "warning" }
   ],
-  "failedMandates": [
-    {
-      "severity": "CRITICAL",
-      "icon": "no_encryption",
-      "code": "NIST-AI-1.2",
-      "title": "Model Weight Encryption Failure",
-      "document": "NIST AI Risk Management Framework 1.0",
-      "section": "4.3.1",
-      "violation": "Violation: Model weights in /production/weights/ detected as plaintext.",
-      "required": "Required: AES-256 encryption-at-rest for sensitive ML assets.",
-      "reference": "SEC-772"
-    },
-    {
-      "severity": "CRITICAL",
-      "icon": "visibility_off",
-      "code": "EU-AI-ACT-15",
-      "title": "Inadequate Human Oversight",
-      "document": "EU Artificial Intelligence Act",
-      "section": "Article 14.3",
-      "violation": "Violation: Autonomous decision-making pipeline lacks mandatory manual override capability.",
-      "required": "Required: Explicit Human-in-the-Loop (HITL) validation interface.",
-      "reference": "COMP-EU-9"
-    },
-    {
-      "severity": "HIGH",
-      "icon": "code_off",
-      "code": "OWASP-LLM-02",
-      "title": "Insecure Output Handling",
-      "document": "OWASP Top 10 for LLM Applications",
-      "section": "2.1.3",
-      "violation": "Violation: Output sanitization layer missing regex filters for executable code patterns.",
-      "required": "Risk: Remote Code Execution via LLM output injection.",
-      "reference": "APPSEC-02"
-    }
-  ],
-  "passedChecks": [
-    { "code": "NIST-AI-3.1", "title": "Bias Testing Protocol" },
-    { "code": "ISO-42001-A", "title": "Model Documentation" },
-    { "code": "GDPR-ART-22", "title": "Automated Decisions" }
-  ],
-  "passedOverflow": 88,
-  "notApplicable": [
-    { "name": "Voice_Biometrics_Check" },
-    { "name": "Medical_Data_Privacy" }
-  ],
-  "sessionToken": "0x99281-AF-2023",
-  "node": "SG-BETA-01"
+  "failedMandates": [],
+  "reviewMandates": [],
+  "passedChecks": [],
+  "passedOverflow": 0,
+  "notApplicable": [],
+  "sessionToken": "PENDING",
+  "node": "LOCAL-SCAN-SERVER"
 }

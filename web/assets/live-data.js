@@ -53,7 +53,10 @@
 
   async function loadPageData(pageKey) {
     const configured = defaultEndpoints[pageKey] || [];
-    const candidates = [...new Set(configured.filter(Boolean))];
+    const candidates =
+      pageKey === "scan-report"
+        ? resolveScanReportCandidates(configured)
+        : [...new Set(configured.filter(Boolean))];
 
     for (const url of candidates) {
       try {
@@ -76,6 +79,48 @@
     }
 
     return null;
+  }
+
+  function resolveScanReportCandidates(configuredCandidates) {
+    const baseCandidates = [...new Set(toArray(configuredCandidates).filter(Boolean))];
+    const runId = resolvePreferredReportRunId();
+    if (!isFilled(runId)) {
+      return baseCandidates;
+    }
+    return baseCandidates.map((url) => withRunIdQuery(url, runId));
+  }
+
+  function resolvePreferredReportRunId() {
+    const urlRunId = String(new URLSearchParams(window.location.search).get("runId") || "").trim();
+    if (isFilled(urlRunId)) {
+      return urlRunId;
+    }
+
+    const storedContext = getStoredScanContext();
+    return firstFilled(storedContext.runId, storedContext.latestRunId);
+  }
+
+  function withRunIdQuery(url, runId) {
+    const rawUrl = String(url || "").trim();
+    const normalizedRunId = String(runId || "").trim();
+    if (!isFilled(rawUrl) || !isFilled(normalizedRunId)) {
+      return rawUrl;
+    }
+    if (!rawUrl.includes("/api/scan")) {
+      return rawUrl;
+    }
+
+    try {
+      const parsed = new URL(rawUrl, window.location.origin);
+      parsed.searchParams.set("runId", normalizedRunId);
+      if (/^https?:\/\//i.test(rawUrl)) {
+        return parsed.toString();
+      }
+      return `${parsed.pathname}${parsed.search}`;
+    } catch (_error) {
+      const separator = rawUrl.includes("?") ? "&" : "?";
+      return `${rawUrl}${separator}runId=${encodeURIComponent(normalizedRunId)}`;
+    }
   }
 
   function getStoredScanContext() {
@@ -278,8 +323,6 @@
     const githubPanel = byId("dashboard-github-source-panel");
     const localPathInput = byId("dashboard-local-path-input");
     const githubUrlInput = byId("dashboard-github-url-input");
-    const folderPicker = byId("dashboard-local-folder-picker");
-    const folderButton = byId("dashboard-select-local-folder");
     const executeScanButton = byId("dashboard-execute-scan");
     if (!localButton || !githubButton || !localPanel || !githubPanel || !executeScanButton) {
       return;
@@ -323,7 +366,7 @@
       const modeText =
         activeSourceType === SOURCE_TYPE_GITHUB
           ? "GitHub mode active. Repository will be cloned to temporary folder before scan."
-          : "Local mode active. Select a local folder to scan.";
+          : "Local mode active. Enter an absolute server path to scan.";
       setDashboardSourceStatus(modeText, "info");
     };
 
@@ -355,35 +398,24 @@
       setActiveSourceMode(SOURCE_TYPE_GITHUB, true);
     });
 
-    if (folderButton && folderPicker) {
-      folderButton.addEventListener("click", () => {
-        folderPicker.click();
-      });
-      folderPicker.addEventListener("change", () => {
-        const files = Array.from(folderPicker.files || []);
-        const localPath = resolveLocalDirectoryPath(files);
-        if (!isFilled(localPath)) {
-          setDashboardSourceStatus("Unable to resolve selected folder path.", "error");
-          return;
-        }
+    if (localPathInput) {
+      localPathInput.addEventListener("input", () => {
+        localPathInput.dataset.userEdited = "1";
+        const localPath = String(localPathInput.value || "").trim();
+        mergeScanContext({
+          sourceType: SOURCE_TYPE_LOCAL,
+          localPath
+        });
 
-        if (localPathInput) {
-          localPathInput.value = localPath;
-        }
-        if (targetInput) {
+        if (targetInput && localButton.dataset.sourceType === SOURCE_TYPE_LOCAL) {
           targetInput.value = localPath;
           targetInput.dataset.userEdited = "1";
         }
 
-        const folderRepo = normalizeRepoName(getPathBasename(localPath) || fallbackRepo || data.targetInput);
-        applyHeaderScanContext("dashboard-header-repo", "dashboard-session-id", folderRepo, "", false);
-        mergeScanContext({
-          sourceType: SOURCE_TYPE_LOCAL,
-          localPath,
-          scanTargetPath: localPath
-        });
-        setActiveSourceMode(SOURCE_TYPE_LOCAL, false);
-        setDashboardSourceStatus(`Local folder selected: ${localPath}`, "success");
+        const repoFromPath = normalizeRepoName(getPathBasename(localPath));
+        if (isFilled(repoFromPath)) {
+          applyHeaderScanContext("dashboard-header-repo", "dashboard-session-id", repoFromPath, "", false);
+        }
       });
     }
 
@@ -442,6 +474,10 @@
           localPath,
           githubUrl
         });
+        const sourceId = String(prepared.sourceId || "").trim();
+        if (!isFilled(sourceId)) {
+          throw new Error("Source preparation did not return sourceId.");
+        }
         const resolvedScanPath = String(prepared.scanPath || "").trim();
         if (!isFilled(resolvedScanPath)) {
           throw new Error("Unable to resolve scan target path.");
@@ -465,23 +501,46 @@
         mergeScanContext({
           ...headerContext,
           sourceType: selectedSourceType,
+          sourceId,
           githubUrl: selectedSourceType === SOURCE_TYPE_GITHUB ? githubUrl : "",
-          localPath: selectedSourceType === SOURCE_TYPE_LOCAL ? resolvedScanPath : localPath,
+          localPath: selectedSourceType === SOURCE_TYPE_LOCAL ? localPath : "",
           scanTargetPath: resolvedScanPath
         });
 
         const scanStarted = await dispatchDashboardScanStart({
-          sessionId: headerContext.sessionId,
-          repo: headerContext.repo,
-          sourceType: selectedSourceType,
-          scanPath: resolvedScanPath,
-          githubUrl: selectedSourceType === SOURCE_TYPE_GITHUB ? githubUrl : ""
+          sourceId,
+          sessionId: headerContext.sessionId
+        });
+        if (!scanStarted || !scanStarted.body || typeof scanStarted.body !== "object") {
+          throw new Error("Scan start endpoint unavailable. Configure /api/scan/start.");
+        }
+
+        const runId = firstFilled(scanStarted.body.runId);
+        if (!isFilled(runId)) {
+          throw new Error("Scan start response did not include runId.");
+        }
+        const statusUrl = firstFilled(
+          scanStarted.body.statusUrl,
+          `/api/scan/status?runId=${encodeURIComponent(runId)}`
+        );
+        const reportUrl = firstFilled(
+          scanStarted.body.reportUrl,
+          `/api/scan-report?runId=${encodeURIComponent(runId)}`
+        );
+
+        mergeScanContext({
+          runId,
+          latestRunId: runId,
+          scanStatusUrl: statusUrl,
+          scanReportUrl: reportUrl
         });
 
-        const completionMessage = scanStarted
-          ? `Scan started for ${resolvedScanPath}`
-          : `Scan target ready: ${resolvedScanPath}`;
-        setDashboardSourceStatus(completionMessage, "success");
+        setDashboardSourceStatus(`Scan ${runId} started. Polling status...`, "info");
+        void pollDashboardScanStatus({
+          runId,
+          statusUrl,
+          reportUrl
+        });
       } catch (error) {
         const failureMessage =
           error instanceof Error && isFilled(error.message)
@@ -503,14 +562,7 @@
       return prepareGitHubScanSource(input.githubUrl);
     }
 
-    if (!isFilled(input.localPath)) {
-      throw new Error("Select a local folder before running scan.");
-    }
-
-    return {
-      scanPath: String(input.localPath).trim(),
-      repo: getPathBasename(input.localPath)
-    };
+    return prepareLocalScanSource(input.localPath);
   }
 
   async function prepareGitHubScanSource(repoUrl) {
@@ -537,6 +589,7 @@
       throw new Error("Backend clone endpoint is unavailable. Configure /api/scan/prepare-source.");
     }
 
+    const sourceId = firstFilled(response.body.sourceId);
     const scanPath = firstFilled(
       response.body.scanPath,
       response.body.targetPath,
@@ -544,18 +597,62 @@
       response.body.tempPath,
       response.body.localPath
     );
+    if (!isFilled(sourceId)) {
+      throw new Error("GitHub source prepare did not return sourceId.");
+    }
     if (!isFilled(scanPath)) {
       throw new Error("GitHub repo was prepared, but no temp scan path was returned.");
     }
 
     return {
+      sourceId: String(sourceId),
       scanPath: String(scanPath),
       repo: firstFilled(response.body.repo, extractRepoNameFromGitHubUrl(repoUrl))
     };
   }
 
-  async function dispatchDashboardScanStart(payload) {
+  async function prepareLocalScanSource(localPath) {
+    const normalizedPath = String(localPath || "").trim();
+    if (!isFilled(normalizedPath)) {
+      throw new Error("Enter a server local path before running scan.");
+    }
+
     const response = await postJsonToCandidateEndpoints(
+      [
+        window.NEON_SCAN_ENDPOINTS?.prepareSource,
+        window.NEON_SCAN_ENDPOINTS?.prepare,
+        window.NEON_DATA_ENDPOINTS?.prepareSource,
+        "/api/scan/prepare-source",
+        "/api/scan/prepare"
+      ],
+      {
+        sourceType: SOURCE_TYPE_LOCAL,
+        localPath: normalizedPath
+      }
+    );
+
+    if (!response || !response.body || typeof response.body !== "object") {
+      throw new Error("Local source preparation endpoint is unavailable.");
+    }
+
+    const sourceId = firstFilled(response.body.sourceId);
+    const scanPath = firstFilled(response.body.scanPath, response.body.localPath, normalizedPath);
+    if (!isFilled(sourceId)) {
+      throw new Error("Local source prepare did not return sourceId.");
+    }
+    if (!isFilled(scanPath)) {
+      throw new Error("Local source prepare did not return scanPath.");
+    }
+
+    return {
+      sourceId: String(sourceId),
+      scanPath: String(scanPath),
+      repo: firstFilled(response.body.repo, getPathBasename(scanPath))
+    };
+  }
+
+  async function dispatchDashboardScanStart(payload) {
+    return postJsonToCandidateEndpoints(
       [
         window.NEON_SCAN_ENDPOINTS?.start,
         window.NEON_SCAN_ENDPOINTS?.execute,
@@ -565,7 +662,121 @@
       ],
       payload
     );
-    return Boolean(response);
+  }
+
+  async function pollDashboardScanStatus(params) {
+    const runId = String(params?.runId || "").trim();
+    if (!isFilled(runId)) {
+      return;
+    }
+
+    const pollIntervalMs = 2000;
+    const maxAttempts = 1800;
+    const statusCandidates = [
+      params?.statusUrl,
+      window.NEON_SCAN_ENDPOINTS?.status,
+      window.NEON_DATA_ENDPOINTS?.scanStatus,
+      `/api/scan/status?runId=${encodeURIComponent(runId)}`
+    ]
+      .filter(Boolean)
+      .map((url) => withRunIdQuery(url, runId));
+
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const statusResponse = await fetchJsonFromCandidateEndpoints(statusCandidates);
+
+      if (!statusResponse || !statusResponse.body || typeof statusResponse.body !== "object") {
+        if (attempt === 0) {
+          setDashboardSourceStatus(`Scan ${runId} status endpoint unavailable.`, "error");
+          return;
+        }
+        await wait(pollIntervalMs);
+        continue;
+      }
+
+      const state = String(statusResponse.body.state || statusResponse.body.status || "").toLowerCase();
+      const progress = statusResponse.body.progress && typeof statusResponse.body.progress === "object"
+        ? statusResponse.body.progress
+        : {};
+      const completed = Math.max(0, Number(progress.completed) || 0);
+      const total = Math.max(0, Number(progress.total) || 0);
+      const failed = Math.max(0, Number(progress.failed) || 0);
+      const review = Math.max(0, Number(progress.review) || 0);
+
+      if (state === "queued") {
+        setDashboardSourceStatus(`Scan ${runId} queued...`, "info");
+      } else if (state === "running") {
+        if (total > 0) {
+          setDashboardSourceStatus(
+            `Scan ${runId}: ${completed}/${total} checks processed (${failed} fail, ${review} review).`,
+            "info"
+          );
+        } else {
+          setDashboardSourceStatus(`Scan ${runId} is running...`, "info");
+        }
+      } else if (state === "completed") {
+        const reportPageUrl = `../scan-report/index.html?runId=${encodeURIComponent(runId)}`;
+        mergeScanContext({
+          runId,
+          latestRunId: runId,
+          scanStatusUrl: firstFilled(params?.statusUrl),
+          scanReportUrl: firstFilled(params?.reportUrl),
+          scanState: "completed"
+        });
+        setDashboardSourceStatus(`Scan ${runId} completed. Opening report...`, "success");
+        window.setTimeout(() => {
+          window.location.href = reportPageUrl;
+        }, 400);
+        return;
+      } else if (state === "failed") {
+        const errorMessage = firstFilled(statusResponse.body.error, `Scan ${runId} failed.`);
+        mergeScanContext({
+          runId,
+          latestRunId: runId,
+          scanState: "failed"
+        });
+        setDashboardSourceStatus(errorMessage, "error");
+        return;
+      }
+
+      await wait(pollIntervalMs);
+    }
+
+    setDashboardSourceStatus(`Scan ${runId} status polling timed out. Open report manually.`, "error");
+  }
+
+  async function fetchJsonFromCandidateEndpoints(candidates) {
+    const uniqueCandidates = [...new Set(toArray(candidates).filter(Boolean))];
+    for (const url of uniqueCandidates) {
+      try {
+        const response = await fetch(url, {
+          cache: "no-store",
+          headers: {
+            Accept: "application/json"
+          }
+        });
+        if (!response.ok) {
+          continue;
+        }
+        const contentType = response.headers.get("content-type") || "";
+        const payload = contentType.includes("application/json")
+          ? await response.json()
+          : { message: await response.text() };
+        return {
+          url,
+          body: payload
+        };
+      } catch (_error) {
+        // Try next endpoint.
+      }
+    }
+
+    return null;
+  }
+
+  async function wait(ms) {
+    return new Promise((resolve) => {
+      window.setTimeout(resolve, ms);
+    });
   }
 
   async function postJsonToCandidateEndpoints(candidates, body) {
@@ -633,34 +844,6 @@
     const normalized = String(pathValue).trim().replace(/[\\/]+$/, "");
     const segments = normalized.split(/[\\/]/).filter(Boolean);
     return segments.length > 0 ? segments[segments.length - 1] : "";
-  }
-
-  function resolveLocalDirectoryPath(files) {
-    const fileList = toArray(files);
-    if (fileList.length === 0) {
-      return "";
-    }
-
-    const firstFile = fileList[0];
-    const relativePath = String(firstFile.webkitRelativePath || "").replace(/\\/g, "/");
-    const relativeSegments = relativePath.split("/").filter(Boolean);
-    const rootFolder = relativeSegments[0] || "";
-    const absoluteFilePath = isFilled(firstFile.path) ? String(firstFile.path).replace(/\\/g, "/") : "";
-
-    if (isFilled(absoluteFilePath) && relativeSegments.length > 0) {
-      const relativeSuffix = relativeSegments.join("/");
-      if (absoluteFilePath.endsWith(relativeSuffix)) {
-        const basePath = absoluteFilePath.slice(0, absoluteFilePath.length - relativeSuffix.length).replace(/[\\/]+$/, "");
-        return isFilled(rootFolder) ? `${basePath}/${rootFolder}` : basePath;
-      }
-    }
-
-    if (isFilled(absoluteFilePath)) {
-      const withoutFileName = absoluteFilePath.replace(/\/[^/]+$/, "");
-      return withoutFileName;
-    }
-
-    return rootFolder;
   }
 
   function setDashboardSourceStatus(message, tone) {
@@ -875,20 +1058,25 @@
     }
 
     const failedMandates = toArray(data.failedMandates);
+    const reviewMandates = toArray(data.reviewMandates);
     const rawPassRate = Number(data.passRate);
     const passRate = Number.isFinite(rawPassRate) ? Math.max(0, Math.min(100, rawPassRate)) : NaN;
     const rawFailCount = Number(data.fail);
     const derivedFailCount = Number.isFinite(rawFailCount) ? Math.max(0, Math.round(rawFailCount)) : failedMandates.length;
+    const rawReviewCount = Number(data.review);
+    const derivedReviewCount = Number.isFinite(rawReviewCount) ? Math.max(0, Math.round(rawReviewCount)) : reviewMandates.length;
 
-    const bannerTone = getTone(data.severity || data.status || (derivedFailCount > 0 ? "critical" : "success"));
+    const bannerTone = getTone(
+      data.severity || data.status || (derivedFailCount > 0 ? "critical" : derivedReviewCount > 0 ? "warning" : "success")
+    );
     styleScanBanner(bannerTone);
 
-    const computedTitle = buildScanStatusTitle(data, failedMandates, derivedFailCount);
+    const computedTitle = buildScanStatusTitle(data, failedMandates, derivedFailCount, derivedReviewCount);
     if (isFilled(computedTitle)) {
       setText("scan-status-title", computedTitle);
     }
 
-    const computedSubtitle = buildScanStatusSubtitle(data, derivedFailCount, passRate);
+    const computedSubtitle = buildScanStatusSubtitle(data, derivedFailCount, derivedReviewCount, passRate);
     if (isFilled(computedSubtitle)) {
       setText("scan-status-subtitle", computedSubtitle);
     }
@@ -935,56 +1123,77 @@
     }
 
     const failedRoot = byId("scan-failed-mandates-list");
-    if (failedRoot && failedMandates.length > 0) {
-      failedRoot.innerHTML = failedMandates.map((item) => renderFailedMandate(item)).join("");
+    if (failedRoot) {
+      if (failedMandates.length > 0 || reviewMandates.length > 0) {
+        failedRoot.innerHTML = [...failedMandates, ...reviewMandates].map((item) => renderFailedMandate(item)).join("");
+      } else {
+        failedRoot.innerHTML = `
+          <div class="border border-success bg-surface/30 p-6 text-center font-mono text-sm text-success">
+            NO FAILED OR REVIEW MANDATES
+          </div>
+        `;
+      }
     }
 
     const passedChecks = toArray(data.passedChecks);
-    if (passedChecks.length > 0) {
-      setText("scan-passed-count", String(passedChecks.length));
-    }
+    setText("scan-passed-count", String(passedChecks.length));
 
     const passedRoot = byId("scan-passed-list");
-    if (passedRoot && passedChecks.length > 0) {
-      const overflow = Number.isFinite(Number(data.passedOverflow)) ? Number(data.passedOverflow) : 0;
-      passedRoot.innerHTML = `${passedChecks
-        .map(
-          (item) => `
-            <div class="bg-surface/30 border border-border p-3 flex items-center justify-between hover:border-primary/50 transition-colors cursor-pointer">
-              <div class="flex flex-col">
-              <span class="text-[9px] text-text-muted font-mono font-bold">${escapeHtml(item.code || "UNKNOWN")}</span>
-              <span class="text-[11px] text-white font-mono uppercase">${escapeHtml(item.title || "Untitled Check")}</span>
-            </div>
-              <span class="material-symbols-outlined text-success text-[18px]">check</span>
-            </div>
-          `
-        )
-        .join("")}
-        ${
-          overflow > 0
-            ? `<div class="text-center py-3 text-[10px] font-mono text-text-muted border border-border border-dashed hover:text-white transition-colors cursor-pointer uppercase">+ ${overflow} more compliant mandates</div>`
-            : ""
-        }`;
+    if (passedRoot) {
+      if (passedChecks.length > 0) {
+        const overflow = Number.isFinite(Number(data.passedOverflow)) ? Number(data.passedOverflow) : 0;
+        passedRoot.innerHTML = `${passedChecks
+          .map(
+            (item) => `
+              <div class="bg-surface/30 border border-border p-3 flex items-center justify-between hover:border-primary/50 transition-colors cursor-pointer">
+                <div class="flex flex-col">
+                <span class="text-[9px] text-text-muted font-mono font-bold">${escapeHtml(item.code || "UNKNOWN")}</span>
+                <span class="text-[11px] text-white font-mono uppercase">${escapeHtml(item.title || "Untitled Check")}</span>
+              </div>
+                <span class="material-symbols-outlined text-success text-[18px]">check</span>
+              </div>
+            `
+          )
+          .join("")}
+          ${
+            overflow > 0
+              ? `<div class="text-center py-3 text-[10px] font-mono text-text-muted border border-border border-dashed hover:text-white transition-colors cursor-pointer uppercase">+ ${overflow} more compliant mandates</div>`
+              : ""
+          }`;
+      } else {
+        passedRoot.innerHTML = `
+          <div class="text-center py-3 text-[10px] font-mono text-text-muted border border-border border-dashed uppercase">
+            NO PASSED MANDATES IN THIS RUN
+          </div>
+        `;
+      }
     }
 
     const notApplicable = toArray(data.notApplicable);
-    if (notApplicable.length > 0) {
-      setText("scan-not-applicable-count", String(notApplicable.length));
-    }
+    setText("scan-not-applicable-count", String(notApplicable.length));
 
     const notApplicableRoot = byId("scan-not-applicable-list");
-    if (notApplicableRoot && notApplicable.length > 0) {
-      notApplicableRoot.innerHTML = notApplicable
-        .map(
-          (item, index) => `
-            <div class="flex items-center justify-between text-[11px] font-mono text-text-muted">
-              <span class="uppercase">${escapeHtml(item.name || "N/A")}</span>
-              <span class="text-[9px] px-1 border border-text-muted">N/A</span>
-            </div>
-            ${index < notApplicable.length - 1 ? '<div class="w-full h-px bg-border"></div>' : ""}
-          `
-        )
-        .join("");
+    if (notApplicableRoot) {
+      if (notApplicable.length > 0) {
+        notApplicableRoot.innerHTML = notApplicable
+          .map(
+            (item, index) => `
+              <div class="flex items-center justify-between text-[11px] font-mono text-text-muted">
+                <span class="uppercase">${escapeHtml(item.name || "N/A")}</span>
+                <span class="text-[9px] px-1 border border-text-muted">N/A</span>
+              </div>
+              ${index < notApplicable.length - 1 ? '<div class="w-full h-px bg-border"></div>' : ""}
+            `
+          )
+          .join("");
+      } else {
+        notApplicableRoot.innerHTML = `
+          <div class="flex items-center justify-between text-[11px] font-mono text-text-muted">
+            <span class="uppercase">NONE</span>
+            <span class="text-[9px] px-1 border border-text-muted">N/A</span>
+          </div>
+        `;
+      }
     }
 
     if (isFilled(data.sessionToken)) {
@@ -995,6 +1204,12 @@
     }
 
     const storedContext = getStoredScanContext();
+    if (isFilled(data.reportId)) {
+      mergeScanContext({
+        runId: String(data.reportId),
+        latestRunId: String(data.reportId)
+      });
+    }
     const repoFromScanReport = normalizeRepoName(data.repo || byId("scan-repo")?.textContent);
     const preferredRepo = isFilled(data.sessionId)
       ? repoFromScanReport
@@ -1002,29 +1217,35 @@
     applyHeaderScanContext("scan-repo", "scan-session-id", preferredRepo, data.sessionId, false);
   }
 
-  function buildScanStatusTitle(data, failedMandates, failCount) {
+  function buildScanStatusTitle(data, failedMandates, failCount, reviewCount) {
     if (isFilled(data.statusTitle)) {
       return String(data.statusTitle);
     }
 
     const criticalCount = failedMandates.filter((item) => String(item?.severity || "").toLowerCase().includes("critical")).length;
-    if (failCount <= 0) {
+    if (failCount <= 0 && reviewCount <= 0) {
       return "COMPLIANCE CHECKS PASSED";
+    }
+    if (failCount <= 0 && reviewCount > 0) {
+      return `${reviewCount} MANDATES REQUIRE REVIEW`;
     }
     if (criticalCount > 0) {
       return "CRITICAL MANDATES REQUIRE ACTION";
     }
     if (failCount > 0) {
-      return `${failCount} MANDATES REQUIRE REVIEW`;
+      return `${failCount} MANDATES FAILED`;
     }
     return "LIVE COMPLIANCE POSTURE";
   }
 
-  function buildScanStatusSubtitle(data, failCount, passRate) {
-    const result = toUpper(data.result || (failCount > 0 ? "MANDATE_GAPS_FOUND" : "ALL_CHECKS_PASSED"));
-    const action = toUpper(data.action || (failCount > 0 ? "REMEDIATION_IN_PROGRESS" : "CONTINUOUS_MONITORING"));
+  function buildScanStatusSubtitle(data, failCount, reviewCount, passRate) {
+    const openCount = Math.max(0, failCount) + Math.max(0, reviewCount);
+    const result = toUpper(data.result || (openCount > 0 ? "MANDATE_GAPS_FOUND" : "ALL_CHECKS_PASSED"));
+    const action = toUpper(
+      data.action || (failCount > 0 ? "REMEDIATION_IN_PROGRESS" : reviewCount > 0 ? "REVIEW_EVIDENCE_REQUESTS" : "CONTINUOUS_MONITORING")
+    );
     const passRateToken = Number.isFinite(passRate) ? `${Math.round(passRate)}%` : "--";
-    return `// RESULT: ${result} // OPEN_MANDATES: ${failCount} // PASS_RATE: ${passRateToken} // ${action}`;
+    return `// RESULT: ${result} // FAIL: ${failCount} // REVIEW: ${reviewCount} // OPEN_MANDATES: ${openCount} // PASS_RATE: ${passRateToken} // ${action}`;
   }
 
   function startLiveTimestampClock(elementId) {

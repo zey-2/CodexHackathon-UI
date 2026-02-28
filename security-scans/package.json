@@ -5,6 +5,8 @@
   "type": "module",
   "description": "Codex SDK security skill orchestration runner",
   "scripts": {
+    "serve": "tsx src/server.ts",
+    "serve:dev": "tsx watch src/server.ts",
     "scan": "tsx src/orchestrate.ts",
     "scan:dry": "tsx src/orchestrate.ts --dry-run",
     "typecheck": "tsc --noEmit"

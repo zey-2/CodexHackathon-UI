@@ -200,14 +200,11 @@
                     </button>
 </div>
 <div class="border border-border bg-black/50 p-4 space-y-4" id="dashboard-local-source-panel">
-<div class="flex items-center justify-between gap-4">
-<label class="font-mono text-[10px] font-bold uppercase tracking-widest text-text-muted">Local Folder Path</label>
-<button class="border border-primary/40 px-3 py-1 text-[10px] font-mono font-bold uppercase tracking-widest text-primary hover:bg-primary/20 transition-colors" id="dashboard-select-local-folder" type="button">
-                            Browse
-                        </button>
-</div>
-<input class="w-full bg-background border border-border focus:border-primary text-text-main font-code text-xs px-3 py-2 focus:ring-0" id="dashboard-local-path-input" placeholder="/path/to/project" readonly="" type="text"/>
-<input class="hidden" directory="" id="dashboard-local-folder-picker" multiple="" type="file" webkitdirectory=""/>
+<label class="font-mono text-[10px] font-bold uppercase tracking-widest text-text-muted">Server Local Path</label>
+<input class="w-full bg-background border border-border focus:border-primary text-text-main font-code text-xs px-3 py-2 focus:ring-0 placeholder-text-muted" id="dashboard-local-path-input" placeholder="/absolute/path/on/server" type="text"/>
+<p class="font-mono text-[9px] uppercase tracking-wide text-text-muted">
+                        Path must exist on the scan server host and be allowed by SCAN_ALLOWED_ROOTS.
+                    </p>
 </div>
 <div class="hidden border border-border bg-black/50 p-4 space-y-2" id="dashboard-github-source-panel">
 <label class="font-mono text-[10px] font-bold uppercase tracking-widest text-text-muted">GitHub Repository URL</label>

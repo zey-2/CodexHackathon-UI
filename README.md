@@ -1,47 +1,113 @@
 # Neon Guardian UI
 
-Frontend-only repository for the Neon Guardian interface.
+Integrated Neon Guardian frontend + scan backend in one repository.
 
 ## Repository Structure
 
 - `web/pages/`
 - `web/assets/`
 - `web/data/`
+- `security-scans/`
 - `docs/`
 
-### Pages
+## Prerequisites
 
-- `web/pages/dashboard/index.html`
-- `web/pages/compliance-codex/index.html`
-- `web/pages/scan-report/index.html`
+- Node.js 18+
+- npm
+- git
+- `OPENAI_API_KEY`
 
-### Data strategy
+## Run The App (Integrated UI + API)
 
-`web/assets/live-data.js` resolves data in this order:
+Run the app from the scan backend folder so UI and `/api/*` are served from one origin.
 
-1. `window.NEON_DATA_ENDPOINTS.<pageKey>`
-2. Backend API endpoint (for external backend repo)
-3. Local fallback JSON in `web/data/*.json`
+```bash
+cd security-scans
+npm install
+cp .env.example .env
+```
 
-Default API paths:
+Edit `.env` and set at least:
 
-- `/api/dashboard`
-- `/api/compliance-codex`
-- `/api/scan-report`
+```bash
+OPENAI_API_KEY=your_key_here
+CODEX_MODEL=gpt-5.3-codex
+MAX_CONCURRENCY=4
+PORT=8080
+SCAN_MAX_PARALLEL_RUNS=2
+SCAN_KEEP_RUNS=30
+SCAN_ALLOWED_ROOTS=/home/bitrunner2/CodexHackathon-UI,/tmp
+```
 
-## Backend Integration (External Repo)
+Start server:
 
-This repo does not contain backend code.
+```bash
+npm run serve
+```
 
-Expected backend contract (from separate repo):
+Open:
 
-- Expose the `/api/*` endpoints above
-- Return JSON payloads matching the structures in `web/data/*.json`
-- Enable CORS for this frontend origin, or serve frontend/backend behind a shared gateway
+- `http://localhost:8080` (auto-redirects to dashboard)
 
-## Local Preview
+## Run Security Scan From UI
 
-From repository root:
+1. Open `http://localhost:8080`.
+2. On **Dashboard**, choose source type:
+   - `GitHub Repo URL`: enter `https://github.com/org/repo.git`
+   - `Server Local Path`: enter absolute path on server host (must be inside `SCAN_ALLOWED_ROOTS`)
+3. Click **[ EXECUTE_SCAN ]**.
+4. Dashboard status line will poll run state (`queued` / `running` / `completed` / `failed`).
+5. On completion, UI auto-opens `Scan Report` for that run (`?runId=...`).
+
+## Run Security Scan From CLI
+
+From `security-scans/`:
+
+Dry run (skill discovery only):
+
+```bash
+npm run scan:dry -- --repo-url https://github.com/example/repo.git
+```
+
+Execute scan:
+
+```bash
+npm run scan -- --repo-url https://github.com/example/repo.git
+```
+
+Optional flags:
+
+```bash
+npm run scan -- --repo-url https://github.com/example/repo.git --max-concurrency 4 --model gpt-5.3-codex --run-id my-run-id
+```
+
+## Output Artifacts
+
+Scan artifacts are written to:
+
+- `security-scans/results/<run-id>/<skill-name>.json`
+- `security-scans/results/<run-id>/summary.json`
+- `security-scans/results/<run-id>/run-state.json`
+
+Temporary/working content:
+
+- `security-scans/workspaces/`
+- `security-scans/skillpacks/`
+
+Retention pruning keeps the newest `SCAN_KEEP_RUNS` runs.
+
+## API Endpoints Used By UI
+
+- `GET /api/dashboard`
+- `GET /api/compliance-codex`
+- `GET /api/scan-report[?runId=...]`
+- `POST /api/scan/prepare-source`
+- `POST /api/scan/start`
+- `GET /api/scan/status?runId=...`
+
+## Static Preview (No Backend Scan Execution)
+
+For visual-only preview with fallback JSON:
 
 ```bash
 python3 -m http.server 8080

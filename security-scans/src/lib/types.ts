@@ -7,6 +7,26 @@ export type SkillAssessment =
 
 export type SkillConfidence = "low" | "medium" | "high" | "n/a";
 
+export type ScanSourceType = "github" | "local";
+export type ScanRunLifecycleState = "queued" | "running" | "completed" | "failed";
+
+export interface ScanRunTarget {
+  sourceType: ScanSourceType;
+  repo: string;
+  repoUrl?: string;
+  scanPath?: string;
+}
+
+export interface ScanRunRequest {
+  runId: string;
+  maxConcurrency: number;
+  model: string;
+  skillpackRepoUrl: string;
+  scansRoot: string;
+  dryRun?: boolean;
+  target: ScanRunTarget;
+}
+
 export interface ScanRunConfig {
   repoUrl: string;
   maxConcurrency: number;
@@ -17,6 +37,7 @@ export interface ScanRunConfig {
   skillpackClonePath: string;
   targetRepoPath: string;
   resultDir: string;
+  sourceType: ScanSourceType;
 }
 
 export interface SkillDescriptor {
@@ -83,4 +104,59 @@ export interface ScanSummary {
   startedAt: string;
   endedAt: string;
   results: SkillRunResult[];
+}
+
+export interface SkillProgress {
+  total: number;
+  completed: number;
+  success: number;
+  failed: number;
+  review: number;
+}
+
+export interface SkillProgressUpdate extends SkillProgress {
+  skillName: string;
+}
+
+export interface ScanRunState {
+  runId: string;
+  sessionId: string;
+  sourceType: ScanSourceType;
+  repo: string;
+  scanPath: string;
+  state: ScanRunLifecycleState;
+  progress: SkillProgress;
+  resultDir: string;
+  summaryPath: string;
+  createdAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
+  error: string | null;
+  updatedAt: string;
+}
+
+export interface PreparedSource {
+  sourceId: string;
+  sourceType: ScanSourceType;
+  repo: string;
+  scanPath: string;
+  repoUrl: string;
+  preparedAt: string;
+  expiresAt: string;
+  used: boolean;
+}
+
+export interface ScanRunExecutionResult {
+  config: ScanRunConfig;
+  summary: ScanSummary;
+  summaryPath: string;
+}
+
+export interface ScanRunDryPlan {
+  config: ScanRunConfig;
+  discoveredSkills: string[];
+}
+
+export interface ScanReportPayload {
+  [key: string]: unknown;
 }

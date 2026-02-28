@@ -102,6 +102,46 @@
             0% { transform: scale(0.72); opacity: 0.6; }
             100% { transform: scale(1.7); opacity: 0; }
         }
+        .footer-ticker-viewport {
+            position: relative;
+            overflow: hidden;
+        }
+        .footer-ticker-track {
+            display: inline-flex;
+            align-items: center;
+            gap: 2rem;
+            min-width: max-content;
+            padding-left: 100%;
+            animation: footer-ticker-scroll 42s linear infinite;
+        }
+        .footer-ticker-track:hover {
+            animation-play-state: paused;
+        }
+        .footer-ticker-group {
+            display: inline-flex;
+            align-items: center;
+            gap: 1.25rem;
+            white-space: nowrap;
+        }
+        .footer-ticker-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            font-size: 10px;
+            font-family: "JetBrains Mono", monospace;
+        }
+        .footer-ticker-label {
+            color: #7F95B5;
+        }
+        .footer-ticker-separator {
+            color: #24385B;
+        }
+        @keyframes footer-ticker-scroll {
+            0% { transform: translateX(0); }
+            100% { transform: translateX(-50%); }
+        }
     </style>
 </head>
 <body class="bg-background-dark text-text-main font-body overflow-hidden h-screen flex" data-page="codex">
@@ -258,10 +298,25 @@ Select one or more mandate pillars to scope the list.
 </div>
 <footer class="h-8 bg-[#101C34] border-t border-[#24385B] flex items-center overflow-hidden shrink-0">
 <div class="px-4 bg-[#EF4444] text-black font-mono text-[10px] font-bold h-full flex items-center shrink-0">
-                LIVE_THREAT_INTEL
+                LIVE_STATUS_TICKER
             </div>
-<div class="flex-1 px-4 font-mono text-[10px] text-text-muted whitespace-nowrap overflow-hidden italic" id="codex-threat-feed">
-<span class="text-critical">CRITICAL:</span> CVE-2024-2191 detected in transformer library v4.2 --- <span class="text-warning">WARNING:</span> New jailbreak pattern identified for Llama-3 variants --- <span class="text-primary">INFO:</span> EU AI Act compliance module updated to v1.2.4 --- <span class="text-critical">CRITICAL:</span> Unauthorized egress from model-training-subnet-B detected...
+<div class="flex-1 px-3 footer-ticker-viewport">
+<div class="footer-ticker-track" id="codex-footer-ticker">
+<div class="footer-ticker-group">
+<span class="footer-ticker-item"><span class="footer-ticker-label">Repo</span><span class="text-text-main">neural-net-v2-production</span></span>
+<span class="footer-ticker-separator">|</span>
+<span class="footer-ticker-item"><span class="footer-ticker-label">Ruleset</span><span class="text-primary">View Only</span></span>
+<span class="footer-ticker-separator">|</span>
+<span class="footer-ticker-item"><span class="footer-ticker-label">Mandates</span><span class="text-text-main">Loading</span></span>
+</div>
+<div aria-hidden="true" class="footer-ticker-group">
+<span class="footer-ticker-item"><span class="footer-ticker-label">Repo</span><span class="text-text-main">neural-net-v2-production</span></span>
+<span class="footer-ticker-separator">|</span>
+<span class="footer-ticker-item"><span class="footer-ticker-label">Ruleset</span><span class="text-primary">View Only</span></span>
+<span class="footer-ticker-separator">|</span>
+<span class="footer-ticker-item"><span class="footer-ticker-label">Mandates</span><span class="text-text-main">Loading</span></span>
+</div>
+</div>
             </div>
 </footer>
 </main>

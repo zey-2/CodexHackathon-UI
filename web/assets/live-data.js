@@ -234,7 +234,7 @@
 
     const storedContext = getStoredScanContext();
     const repoFromDashboard = normalizeRepoName(storedContext.repo || sourceData.repo || targetInput?.value || sourceData.targetInput);
-    applyHeaderScanContext("dashboard-header-repo", "dashboard-session-id", repoFromDashboard, sourceData.sessionId, false);
+    const headerContext = applyHeaderScanContext("dashboard-header-repo", "dashboard-session-id", repoFromDashboard, sourceData.sessionId, false);
     initializeDashboardSourceControls(sourceData, targetInput, repoFromDashboard);
 
     const frameworks = toArray(sourceData.frameworks);
@@ -301,19 +301,32 @@
       }
     }
 
-    const threatFeed = byId("dashboard-threat-feed");
     const threats = toArray(sourceData.threats);
-    if (threatFeed && threats.length > 0) {
-      threatFeed.innerHTML = threats
-        .map((threat) => {
-          const severity = String(threat.severity || "info").toLowerCase();
-          const label = toUpper(threat.label || severity);
-          const className =
-            severity === "critical" ? "text-critical" : severity === "warning" ? "text-warning" : "text-primary";
-          return `<span class="${className}">${escapeHtml(label)}:</span> ${escapeHtml(threat.message || "")}`;
-        })
-        .join(" --- ");
-    }
+    const selectedTarget = toArray(sourceData.targets).find((item) => item && item.selected === true) || toArray(sourceData.targets)[0];
+    const criticalThreat = threats.find((threat) => String(threat?.severity || "").toLowerCase().includes("critical")) || threats[0];
+    const sourceMode = String(storedContext.sourceType || SOURCE_TYPE_LOCAL).toUpperCase();
+    const summaryEntries = Number.isFinite(Number(sourceData.summary?.entries))
+      ? Number(sourceData.summary.entries).toLocaleString("en-US")
+      : "--";
+    const summaryErrors = Number.isFinite(Number(sourceData.summary?.errors))
+      ? Number(sourceData.summary.errors).toLocaleString("en-US")
+      : "--";
+    const summaryWarnings = Number.isFinite(Number(sourceData.summary?.warnings))
+      ? Number(sourceData.summary.warnings).toLocaleString("en-US")
+      : "--";
+
+    setFooterTicker("dashboard-footer-ticker", [
+      { label: "Repo", value: headerContext.repo, tone: "primary" },
+      { label: "Session", value: headerContext.sessionId, tone: "primary" },
+      { label: "Source", value: sourceMode, tone: "primary" },
+      { label: "Target", value: selectedTarget?.name || "N/A", tone: "primary" },
+      { label: "Target Status", value: selectedTarget?.status || "UNKNOWN", tone: inferToneToken(selectedTarget?.status) },
+      { label: "Uplink", value: sourceData.uplinkStatus || "UNKNOWN", tone: inferToneToken(sourceData.uplinkStatus) },
+      { label: "Entries", value: summaryEntries, tone: "primary" },
+      { label: "Errors", value: summaryErrors, tone: Number(summaryErrors) > 0 ? "critical" : "success" },
+      { label: "Warnings", value: summaryWarnings, tone: Number(summaryWarnings) > 0 ? "warning" : "success" },
+      { label: "Alert", value: criticalThreat?.message || "No active critical alerts", tone: inferToneToken(criticalThreat?.severity || "success") }
+    ]);
   }
 
   function initializeDashboardSourceControls(data, targetInput, fallbackRepo) {
@@ -884,6 +897,16 @@
       return;
     }
 
+    const storedContext = getStoredScanContext();
+    const repoFromCodex = normalizeRepoName(data.repo || storedContext.repo || byId("codex-header-repo")?.textContent);
+    const codexHeaderContext = applyHeaderScanContext(
+      "codex-header-repo",
+      "codex-session-id",
+      repoFromCodex,
+      data.sessionId || storedContext.sessionId,
+      false
+    );
+
     const systemStatus = toUpper(data.systemStatus);
     if (systemStatus) {
       setText("codex-system-status", `SYSTEM_STATUS: ${systemStatus}`);
@@ -1002,6 +1025,24 @@
         .map((section, index) => renderCodexSection(section, index))
         .join("");
     }
+
+    const activeFrameworkCount = activeFrameworks.filter((framework) => framework && framework.active !== false).length;
+    const totalFrameworkCount = activeFrameworks.length;
+    const rulesetStatus = data.activeRuleset?.status || "UNKNOWN";
+    const mandatesCount = Number.isFinite(Number(data.activeRuleset?.mandates))
+      ? String(data.activeRuleset.mandates)
+      : "--";
+
+    setFooterTicker("codex-footer-ticker", [
+      { label: "Repo", value: codexHeaderContext.repo, tone: "primary" },
+      { label: "Session", value: codexHeaderContext.sessionId, tone: "primary" },
+      { label: "Ruleset", value: data.activeRuleset?.title || data.selectedFramework || "N/A", tone: "primary" },
+      { label: "Ruleset Status", value: rulesetStatus, tone: inferToneToken(rulesetStatus) },
+      { label: "Mandates", value: mandatesCount, tone: "primary" },
+      { label: "Frameworks Active", value: `${activeFrameworkCount}/${totalFrameworkCount || "--"}`, tone: "primary" },
+      { label: "Operator", value: data.operator?.name || "N/A", tone: "primary" },
+      { label: "Last Sync", value: data.lastSync || "N/A", tone: "primary" }
+    ]);
   }
 
   function renderScanReport(data) {
@@ -1059,14 +1100,15 @@
 
     const failedMandates = toArray(data.failedMandates);
     const reviewMandates = toArray(data.reviewMandates);
-    const rawPassRate = Number(data.passRate);
-    const passRate = Number.isFinite(rawPassRate) ? Math.max(0, Math.min(100, rawPassRate)) : NaN;
+    const passedChecks = toArray(data.passedChecks);
     const rawFailCount = Number(data.fail);
     const derivedFailCount = Number.isFinite(rawFailCount) ? Math.max(0, Math.round(rawFailCount)) : failedMandates.length;
     const rawReviewCount = Number(data.review);
     const derivedReviewCount = Number.isFinite(rawReviewCount) ? Math.max(0, Math.round(rawReviewCount)) : reviewMandates.length;
+    const passRate = resolveScanPassRate(data, derivedFailCount, passedChecks.length);
 
-    const bannerTone = getTone(
+    const bannerTone = getBannerToneByScore(
+      passRate,
       data.severity || data.status || (derivedFailCount > 0 ? "critical" : derivedReviewCount > 0 ? "warning" : "success")
     );
     styleScanBanner(bannerTone);
@@ -1081,18 +1123,23 @@
       setText("scan-status-subtitle", computedSubtitle);
     }
 
+    const roundedPassRate = Number.isFinite(passRate) ? Math.round(passRate) : null;
+    setText("scan-banner-pass-rate", roundedPassRate !== null ? `${roundedPassRate}%` : "--%");
+    const bannerScoreFill = byId("scan-banner-score-fill");
+    if (bannerScoreFill) {
+      bannerScoreFill.style.width = `${Number.isFinite(passRate) ? passRate : 0}%`;
+    }
+
     startLiveTimestampClock("scan-timestamp");
 
-    if (Number.isFinite(passRate)) {
-      setText("scan-pass-rate", `${Math.round(passRate)}%`);
-      const circle = byId("scan-pass-rate-circle");
-      if (circle) {
-        const radius = 45;
-        const circumference = 2 * Math.PI * radius;
-        const fillAmount = (passRate / 100) * circumference;
-        circle.setAttribute("stroke", bannerTone.hex);
-        circle.setAttribute("stroke-dasharray", `${fillAmount} ${circumference}`);
-      }
+    setText("scan-pass-rate", roundedPassRate !== null ? `${roundedPassRate}%` : "--%");
+    const circle = byId("scan-pass-rate-circle");
+    if (circle) {
+      const radius = 45;
+      const circumference = 2 * Math.PI * radius;
+      const fillAmount = ((Number.isFinite(passRate) ? passRate : 0) / 100) * circumference;
+      circle.setAttribute("stroke", bannerTone.hex);
+      circle.setAttribute("stroke-dasharray", `${fillAmount} ${circumference}`);
     }
 
     if (Number.isFinite(Number(data.success))) {
@@ -1135,9 +1182,7 @@
       }
     }
 
-    const passedChecks = toArray(data.passedChecks);
     setText("scan-passed-count", String(passedChecks.length));
-
     const passedRoot = byId("scan-passed-list");
     if (passedRoot) {
       if (passedChecks.length > 0) {
@@ -1145,24 +1190,24 @@
         passedRoot.innerHTML = `${passedChecks
           .map(
             (item) => `
-              <div class="bg-surface/30 border border-border p-3 flex items-center justify-between hover:border-primary/50 transition-colors cursor-pointer">
+              <div class="bg-surface/30 border border-border px-2.5 py-2 flex items-center justify-between hover:border-primary/50 transition-colors cursor-pointer">
                 <div class="flex flex-col">
-                <span class="text-[9px] text-text-muted font-mono font-bold">${escapeHtml(item.code || "UNKNOWN")}</span>
-                <span class="text-[11px] text-white font-mono uppercase">${escapeHtml(item.title || "Untitled Check")}</span>
+                <span class="text-[8px] text-text-muted font-mono font-bold">${escapeHtml(item.code || "UNKNOWN")}</span>
+                <span class="text-[10px] text-white font-mono uppercase">${escapeHtml(item.title || "Untitled Check")}</span>
               </div>
-                <span class="material-symbols-outlined text-success text-[18px]">check</span>
+                <span class="material-symbols-outlined text-success text-[16px]">check</span>
               </div>
             `
           )
           .join("")}
           ${
             overflow > 0
-              ? `<div class="text-center py-3 text-[10px] font-mono text-text-muted border border-border border-dashed hover:text-white transition-colors cursor-pointer uppercase">+ ${overflow} more compliant mandates</div>`
+              ? `<div class="text-center py-2 text-[9px] font-mono text-text-muted border border-border border-dashed hover:text-white transition-colors cursor-pointer uppercase">+ ${overflow} more compliant mandates</div>`
               : ""
           }`;
       } else {
         passedRoot.innerHTML = `
-          <div class="text-center py-3 text-[10px] font-mono text-text-muted border border-border border-dashed uppercase">
+          <div class="text-center py-2 text-[9px] font-mono text-text-muted border border-border border-dashed uppercase">
             NO PASSED MANDATES IN THIS RUN
           </div>
         `;
@@ -1178,9 +1223,9 @@
         notApplicableRoot.innerHTML = notApplicable
           .map(
             (item, index) => `
-              <div class="flex items-center justify-between text-[11px] font-mono text-text-muted">
+              <div class="flex items-center justify-between text-[10px] font-mono text-text-muted">
                 <span class="uppercase">${escapeHtml(item.name || "N/A")}</span>
-                <span class="text-[9px] px-1 border border-text-muted">N/A</span>
+                <span class="text-[8px] px-1 border border-text-muted">N/A</span>
               </div>
               ${index < notApplicable.length - 1 ? '<div class="w-full h-px bg-border"></div>' : ""}
             `
@@ -1188,9 +1233,9 @@
           .join("");
       } else {
         notApplicableRoot.innerHTML = `
-          <div class="flex items-center justify-between text-[11px] font-mono text-text-muted">
+          <div class="flex items-center justify-between text-[10px] font-mono text-text-muted">
             <span class="uppercase">NONE</span>
-            <span class="text-[9px] px-1 border border-text-muted">N/A</span>
+            <span class="text-[8px] px-1 border border-text-muted">N/A</span>
           </div>
         `;
       }
@@ -1214,7 +1259,25 @@
     const preferredRepo = isFilled(data.sessionId)
       ? repoFromScanReport
       : normalizeRepoName(storedContext.repo) || repoFromScanReport;
-    applyHeaderScanContext("scan-repo", "scan-session-id", preferredRepo, data.sessionId, false);
+    const scanHeaderContext = applyHeaderScanContext("scan-repo", "scan-session-id", preferredRepo, data.sessionId, false);
+    const passRateTone = roundedPassRate === null ? "primary" : roundedPassRate >= 85 ? "success" : roundedPassRate >= 60 ? "warning" : "critical";
+
+    setFooterTicker("scan-footer-ticker", [
+      { label: "Repo", value: scanHeaderContext.repo, tone: "primary" },
+      { label: "Session", value: scanHeaderContext.sessionId, tone: "primary" },
+      { label: "Report", value: data.reportId || "N/A", tone: "primary" },
+      { label: "Status", value: computedTitle || data.status || "UNKNOWN", tone: inferToneToken(data.severity || computedTitle) },
+      { label: "Pass Rate", value: roundedPassRate !== null ? `${roundedPassRate}%` : "--", tone: passRateTone },
+      { label: "Success", value: Number.isFinite(Number(data.success)) ? String(data.success) : "--", tone: "success" },
+      { label: "Fail", value: String(derivedFailCount), tone: derivedFailCount > 0 ? "critical" : "success" },
+      {
+        label: "Open Mandates",
+        value: String(Math.max(0, derivedFailCount) + Math.max(0, derivedReviewCount)),
+        tone: derivedFailCount > 0 || derivedReviewCount > 0 ? "warning" : "success"
+      },
+      { label: "Ref", value: data.ref || "N/A", tone: "primary" },
+      { label: "Node", value: data.node || "N/A", tone: "primary" }
+    ]);
   }
 
   function buildScanStatusTitle(data, failedMandates, failCount, reviewCount) {
@@ -1248,6 +1311,43 @@
     return `// RESULT: ${result} // FAIL: ${failCount} // REVIEW: ${reviewCount} // OPEN_MANDATES: ${openCount} // PASS_RATE: ${passRateToken} // ${action}`;
   }
 
+  function getBannerToneByScore(passRate, fallback) {
+    if (Number.isFinite(passRate)) {
+      if (passRate >= 85) {
+        return getTone("success");
+      }
+      if (passRate >= 60) {
+        return getTone("warning");
+      }
+      return getTone("critical");
+    }
+    return getTone(fallback);
+  }
+
+  function resolveScanPassRate(data, failCount, passedCount) {
+    const directPassRate = Number(data.passRate);
+    if (Number.isFinite(directPassRate)) {
+      return Math.max(0, Math.min(100, directPassRate));
+    }
+
+    const passedOverflow = Number(data.passedOverflow);
+    const effectivePassedCount = Math.max(0, Number.isFinite(passedCount) ? passedCount : 0) + Math.max(0, Number.isFinite(passedOverflow) ? passedOverflow : 0);
+    const successCount = Number(data.success);
+    if (Number.isFinite(successCount) && successCount >= 0) {
+      const total = successCount + Math.max(0, Number.isFinite(failCount) ? failCount : 0);
+      if (total > 0) {
+        return Math.max(0, Math.min(100, (successCount / total) * 100));
+      }
+    }
+
+    const totalFromChecks = effectivePassedCount + Math.max(0, Number.isFinite(failCount) ? failCount : 0);
+    if (totalFromChecks > 0) {
+      return Math.max(0, Math.min(100, (effectivePassedCount / totalFromChecks) * 100));
+    }
+
+    return NaN;
+  }
+
   function startLiveTimestampClock(elementId) {
     const timestampNode = byId(elementId);
     if (!timestampNode) {
@@ -1255,7 +1355,7 @@
     }
 
     const updateTimestamp = () => {
-      timestampNode.textContent = formatUtcTimestamp(new Date());
+      timestampNode.textContent = formatLocalTimestamp(new Date());
     };
 
     if (!timestampNode.dataset.liveClockBound) {
@@ -1407,6 +1507,9 @@
     const stripe = byId("scan-banner-stripe");
     const title = byId("scan-status-title");
     const subtitle = byId("scan-status-subtitle");
+    const icon = byId("scan-status-icon");
+    const bannerPassRate = byId("scan-banner-pass-rate");
+    const bannerScoreFill = byId("scan-banner-score-fill");
 
     if (banner) {
       banner.classList.remove(
@@ -1436,6 +1539,22 @@
       subtitle.classList.remove("text-critical/70", "text-warning/70", "text-success/70", "text-primary/70");
       subtitle.classList.add(tone.subtitleClass);
     }
+
+    if (icon) {
+      icon.classList.remove("text-critical", "text-warning", "text-success", "text-primary");
+      icon.classList.add(tone.textClass);
+      icon.textContent = tone.icon || "radar";
+    }
+
+    if (bannerPassRate) {
+      bannerPassRate.classList.remove("text-critical", "text-warning", "text-success", "text-primary");
+      bannerPassRate.classList.add(tone.textClass);
+    }
+
+    if (bannerScoreFill) {
+      bannerScoreFill.classList.remove("bg-critical", "bg-warning", "bg-success", "bg-primary");
+      bannerScoreFill.classList.add(tone.bgClass);
+    }
   }
 
   function getTone(value) {
@@ -1451,7 +1570,8 @@
         subtitleClass: "text-critical/70",
         bannerBgClass: "bg-critical/5",
         glowClass: "shadow-glow-critical",
-        hex: "#EF4444"
+        hex: "#EF4444",
+        icon: "dangerous"
       };
     }
 
@@ -1465,7 +1585,8 @@
         subtitleClass: "text-warning/70",
         bannerBgClass: "bg-warning/5",
         glowClass: "",
-        hex: "#FACC15"
+        hex: "#FACC15",
+        icon: "report_problem"
       };
     }
 
@@ -1479,7 +1600,8 @@
         subtitleClass: "text-success/70",
         bannerBgClass: "bg-success/5",
         glowClass: "",
-        hex: "#22C55E"
+        hex: "#22C55E",
+        icon: "verified"
       };
     }
 
@@ -1492,7 +1614,8 @@
       subtitleClass: "text-primary/70",
       bannerBgClass: "bg-primary/5",
       glowClass: "shadow-glow",
-      hex: "#22D3EE"
+      hex: "#22D3EE",
+      icon: "radar"
     };
   }
 
@@ -1531,19 +1654,80 @@
     return String(raw).replace(/^\[|\]$/g, "").trim();
   }
 
-  function formatUtcTimestamp(value) {
+  function formatLocalTimestamp(value) {
     const date = value instanceof Date ? value : new Date(value);
     if (Number.isNaN(date.getTime())) {
       return "--";
     }
 
-    const year = date.getUTCFullYear();
-    const month = String(date.getUTCMonth() + 1).padStart(2, "0");
-    const day = String(date.getUTCDate()).padStart(2, "0");
-    const hour = String(date.getUTCHours()).padStart(2, "0");
-    const minute = String(date.getUTCMinutes()).padStart(2, "0");
-    const second = String(date.getUTCSeconds()).padStart(2, "0");
-    return `${year}-${month}-${day}_${hour}:${minute}:${second}`;
+    const year = date.getFullYear();
+    const month = date.toLocaleString("en-US", { month: "short" });
+    const day = String(date.getDate()).padStart(2, "0");
+    const hour = String(date.getHours()).padStart(2, "0");
+    const minute = String(date.getMinutes()).padStart(2, "0");
+    const second = String(date.getSeconds()).padStart(2, "0");
+    const timezone = Intl.DateTimeFormat(undefined, { timeZoneName: "short" })
+      .formatToParts(date)
+      .find((part) => part.type === "timeZoneName")?.value;
+
+    return `${day}-${month}-${year} ${hour}:${minute}:${second}${timezone ? ` ${timezone}` : ""}`;
+  }
+
+  function setFooterTicker(tickerId, items) {
+    const ticker = byId(tickerId);
+    if (!ticker) {
+      return;
+    }
+
+    const normalizedItems = toArray(items).filter((item) => item && isFilled(item.value));
+    if (normalizedItems.length === 0) {
+      return;
+    }
+
+    const groupMarkup = normalizedItems
+      .map((item) => renderFooterTickerItem(item))
+      .join('<span class="footer-ticker-separator">|</span>');
+    ticker.innerHTML = `<div class="footer-ticker-group">${groupMarkup}</div><div class="footer-ticker-group" aria-hidden="true">${groupMarkup}</div>`;
+  }
+
+  function renderFooterTickerItem(item) {
+    return `
+      <span class="footer-ticker-item">
+        <span class="footer-ticker-label">${escapeHtml(item.label || "INFO")}</span>
+        <span class="${resolveFooterToneClass(item.tone || inferToneToken(item.value))}">${escapeHtml(item.value)}</span>
+      </span>
+    `;
+  }
+
+  function resolveFooterToneClass(tone) {
+    const token = String(tone || "").toLowerCase();
+    if (token.includes("critical") || token.includes("fail") || token.includes("error")) {
+      return "text-critical";
+    }
+    if (token.includes("warn") || token.includes("review") || token.includes("high")) {
+      return "text-warning";
+    }
+    if (token.includes("success") || token.includes("pass") || token.includes("ready") || token.includes("online") || token.includes("ok")) {
+      return "text-success";
+    }
+    if (token.includes("primary") || token.includes("info")) {
+      return "text-primary";
+    }
+    return "text-text-main";
+  }
+
+  function inferToneToken(value) {
+    const token = String(value || "").toLowerCase();
+    if (token.includes("critical") || token.includes("fail") || token.includes("error") || token.includes("blocker")) {
+      return "critical";
+    }
+    if (token.includes("warn") || token.includes("review") || token.includes("high") || token.includes("standby")) {
+      return "warning";
+    }
+    if (token.includes("pass") || token.includes("success") || token.includes("ready") || token.includes("online") || token.includes("ok") || token.includes("compliant")) {
+      return "success";
+    }
+    return "primary";
   }
 
   function setText(id, value) {

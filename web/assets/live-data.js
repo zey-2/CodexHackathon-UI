@@ -36,6 +36,10 @@
     lines: [],
     lastLineKey: ""
   };
+  const scanReportReviewState = {
+    runId: ""
+  };
+  let scanReportReviewHandlerBound = false;
 
   initialize().catch(() => {
     // Keep static HTML as fallback if live data fails.
@@ -1239,6 +1243,10 @@
     if (isFilled(data.reportId)) {
       setText("scan-report-id", data.reportId);
     }
+    const currentRunId = isFilled(data.reportId) ? String(data.reportId) : "";
+    if (currentRunId) {
+      scanReportReviewState.runId = currentRunId;
+    }
 
     const failedMandates = toArray(data.failedMandates);
     const reviewMandates = toArray(data.reviewMandates);
@@ -1322,6 +1330,8 @@
           </div>
         `;
       }
+
+      attachScanReviewSubmitHandler(failedRoot);
     }
 
     setText("scan-passed-count", String(passedChecks.length));
@@ -1607,6 +1617,24 @@
   function renderFailedMandate(item) {
     const tone = getTone(item.severity || "critical");
     const mandateLink = isFilled(item.documentationUrl) ? item.documentationUrl : "../compliance-codex/index.html";
+    const mandateType = isFilled(item.mandateType) ? String(item.mandateType).toUpperCase() : "NON-CODE-EVALUABLE";
+    const requiredSupportingDocuments = toArray(item.requiredSupportingDocuments);
+    const requiredDocumentMarkup = requiredSupportingDocuments.length > 0
+      ? `
+      <div class="mt-4 bg-background border border-border p-3">
+        <div class="text-[10px] text-text-muted font-mono font-bold mb-2">REQUIRED_SUPPORTING_DOCUMENTS</div>
+        <ul class="text-text-main font-mono text-[10px] space-y-1">
+          ${requiredSupportingDocuments
+            .map((document) => `<li class="list-disc list-inside">${escapeHtml(document)}</li>`)
+            .join("")}
+        </ul>
+      </div>
+    `
+      : "";
+    const reviewOutcome = isFilled(item.reviewOutcome) ? `${toUpper(item.reviewOutcome)}` : "UNREVIEWED";
+    const reviewedAt = isFilled(item.reviewedAt) ? ` // REVIEWED_AT: ${escapeHtml(normalizeTime(item.reviewedAt))}` : "";
+    const reviewFeedback = isFilled(item.reviewFeedback) ? String(item.reviewFeedback) : "";
+    const supportingInputValue = requiredSupportingDocuments.join("\n");
 
     return `
       <div class="border ${tone.borderClass} bg-surface/50 relative group">
@@ -1630,6 +1658,11 @@
               <span class="${tone.textClass} opacity-50">&gt;</span> ${escapeHtml(item.required || "Mitigation details unavailable.")}
             </div>
           </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-[10px] font-mono text-text-muted mb-4">
+            <div>MANDATE_TYPE: <span class="text-text-main">${escapeHtml(mandateType)}</span></div>
+            <div>REVIEW_STATUS: <span class="text-text-main">${escapeHtml(reviewOutcome)}${reviewedAt}</span></div>
+          </div>
+          ${requiredDocumentMarkup}
           <div class="flex flex-col sm:flex-row items-center justify-between gap-4 pt-4 border-t border-border border-dashed">
             <div class="flex items-center gap-2 text-text-muted hover:text-white transition-colors cursor-pointer">
               <span class="material-symbols-outlined text-sm">info</span>
@@ -1639,9 +1672,133 @@
               [ VIEW MANDATE DOCUMENTATION ]
             </a>
           </div>
+          <form class="mt-5 border-t border-border pt-4 space-y-3 scan-mandate-review-form" data-skill-name="${escapeHtml(item.reference || "")}" data-run-id="${escapeHtml(scanReportReviewState.runId)}" data-mandate-name="${escapeHtml(item.title || item.code || 'MANDATE')}">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label class="block text-[9px] font-mono text-text-muted uppercase mb-2">SUPPORTING_DOCUMENTS</label>
+                <textarea name="supportingDocuments" rows="2" class="w-full bg-background border border-border text-text-main text-xs p-2 font-mono focus:outline-none" placeholder="Doc path / artifact URL (one per line or comma-separated)">${escapeHtml(supportingInputValue)}</textarea>
+              </div>
+              <div>
+                <label class="block text-[9px] font-mono text-text-muted uppercase mb-2">FEEDBACK_FOR_REVIEW</label>
+                <textarea name="feedback" rows="2" required class="w-full bg-background border border-border text-text-main text-xs p-2 font-mono focus:outline-none" placeholder="Enter feedback to trigger a re-assessment">${escapeHtml(reviewFeedback)}</textarea>
+              </div>
+            </div>
+            <div class="flex flex-wrap items-center gap-3">
+              <button type="submit" class="px-4 py-2 border ${tone.borderClass} ${tone.textClass} text-xs font-bold font-mono hover:${tone.bgClass} hover:text-black transition-all uppercase tracking-widest">
+                TRIGGER_REVIEW_THREAD
+              </button>
+              <span class="text-[9px] font-mono text-text-muted" data-review-message aria-live="polite"></span>
+            </div>
+          </form>
         </div>
       </div>
     `;
+  }
+
+  function attachScanReviewSubmitHandler(root) {
+    if (scanReportReviewHandlerBound) {
+      return;
+    }
+
+    root.addEventListener("submit", handleScanMandateReviewSubmit);
+    scanReportReviewHandlerBound = true;
+  }
+
+  async function handleScanMandateReviewSubmit(event) {
+    const form = event.target instanceof HTMLFormElement
+      ? event.target
+      : event.target instanceof HTMLElement
+        ? event.target.closest("form.scan-mandate-review-form")
+        : null;
+    if (!form || !(form instanceof HTMLFormElement) || !form.classList.contains("scan-mandate-review-form")) {
+      return;
+    }
+
+    event.preventDefault();
+
+    const statusNode = form.querySelector("[data-review-message]");
+    const submitButton = form.querySelector('button[type="submit"]');
+    const skillName = String(form.dataset.skillName || "").trim();
+    const runId =
+      String(form.dataset.runId || "").trim() ||
+      String(scanReportReviewState.runId || "").trim() ||
+      String(getStoredScanContext().runId || "");
+
+    if (!runId || !skillName) {
+      setReviewMessage(statusNode, "Missing run or mandate identifier.", true);
+      return;
+    }
+
+    const formData = new FormData(form);
+    const feedback = String(formData.get("feedback") || "").trim();
+    const supportingDocuments = String(formData.get("supportingDocuments") || "")
+      .split(/\n|,/g)
+      .map((item) => item.trim())
+      .filter((item) => item);
+
+    if (!feedback) {
+      setReviewMessage(statusNode, "Feedback is required to trigger review.", true);
+      return;
+    }
+
+    if (submitButton) {
+      submitButton.disabled = true;
+      submitButton.textContent = "SUBMITTING...";
+    }
+
+    setReviewMessage(statusNode, "Submitting review request...", false);
+
+    try {
+      const response = await fetch("/api/scan/mandate-review", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          runId,
+          skillName,
+          feedback,
+          supportingDocuments
+        })
+      });
+
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload?.error || `Review request failed: ${response.status}`);
+      }
+
+      const updatedReport = payload.updatedReport;
+      const nextData =
+        updatedReport && typeof updatedReport === "object"
+          ? updatedReport
+          : (await loadPageData("scan-report"));
+
+      if (nextData && typeof nextData === "object") {
+        renderScanReport(nextData);
+      }
+
+      setReviewMessage(statusNode, "Review request submitted. Report refreshed.", false);
+    } catch (error) {
+      setReviewMessage(statusNode, error instanceof Error ? error.message : String(error), true);
+    } finally {
+      if (submitButton) {
+        submitButton.disabled = false;
+        submitButton.textContent = "TRIGGER_REVIEW_THREAD";
+      }
+    }
+  }
+
+  function setReviewMessage(node, message, isError) {
+    if (!node) {
+      return;
+    }
+
+    node.textContent = message || "";
+    const toneClass = isError
+      ? "text-warning"
+      : "text-success";
+    node.classList.remove("text-warning", "text-success", "text-text-muted");
+    node.classList.add(toneClass);
   }
 
   function styleScanBanner(tone) {

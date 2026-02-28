@@ -5,6 +5,8 @@ export type SkillAssessment =
   | "pass"
   | "fail";
 
+export type MandateType = "code-evaluable" | "partial-code-evaluable" | "non-code-evaluable";
+
 export type SkillConfidence = "low" | "medium" | "high" | "n/a";
 
 export type ScanSourceType = "github" | "local";
@@ -89,6 +91,38 @@ export interface SkillRunResult {
   response: SkillResponse | null;
   rawResponse: string | null;
   threadId: string | null;
+  review?: MandateReviewRecord;
+}
+
+export interface MandateReviewInput {
+  feedback: string;
+  supportingDocuments: string[];
+}
+
+export interface MandateReviewRecord {
+  runId: string;
+  skillName: string;
+  reviewedAt: string;
+  reviewInput: MandateReviewInput;
+  reviewResult: MandateReviewResult;
+}
+
+export interface MandateReviewResult {
+  status: SkillRunStatus;
+  startedAt: string;
+  endedAt: string;
+  outputFile: string | null;
+  error: string | null;
+  response: SkillResponse | null;
+  rawResponse: string | null;
+  threadId: string | null;
+}
+
+export interface MandateReviewRequest {
+  runId: string;
+  skillName: string;
+  feedback: string;
+  supportingDocuments?: string[];
 }
 
 export interface ScanSummary {
@@ -104,6 +138,7 @@ export interface ScanSummary {
   startedAt: string;
   endedAt: string;
   results: SkillRunResult[];
+  reviewResults?: MandateReviewRecord[];
 }
 
 export interface SkillProgress {

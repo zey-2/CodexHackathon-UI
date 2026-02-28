@@ -1,7 +1,13 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
-import type { ScanRunState, ScanSummary, SkillRunResult } from "./types.js";
+import type {
+  MandateReviewRecord,
+  MandateType,
+  ScanRunState,
+  ScanSummary,
+  SkillRunResult
+} from "./types.js";
 
 interface MappedMandate {
   code: string;
@@ -13,6 +19,11 @@ interface MappedMandate {
   document: string;
   section: string;
   reference: string;
+  mandateType: MandateType;
+  requiredSupportingDocuments: string[];
+  reviewOutcome?: "pass" | "fail" | "review";
+  reviewedAt?: string;
+  reviewFeedback?: string;
 }
 
 function parseJson(raw: string): unknown {
@@ -53,7 +64,7 @@ function normalizeSeverity(value: string): "critical" | "high" | "medium" | "low
   return "warning";
 }
 
-function mandateIdFromSkillName(skillName: string): string {
+function toMandateId(skillName: string): string {
   const match = skillName.match(/mandate-(\d+)-(\d+)-(\d+)/i);
   if (!match) {
     return skillName;
@@ -61,13 +72,34 @@ function mandateIdFromSkillName(skillName: string): string {
   return `${match[1]}.${match[2]}.${match[3]}`;
 }
 
-function titleFromSkillName(skillName: string): string {
+function toMandateTitle(skillName: string): string {
   return skillName
     .replace(/\.json$/i, "")
     .replace(/^mandate-\d+-\d+-\d+-?/i, "")
     .replace(/-/g, " ")
     .trim()
     .replace(/\b\w/g, (char) => char.toUpperCase()) || "Mandate Check";
+}
+
+function determineMandateType(skillName: string): MandateType {
+  if (/-code-evaluation$/i.test(skillName)) {
+    return "code-evaluable";
+  }
+
+  if (/-code-static-eval$/i.test(skillName)) {
+    return "partial-code-evaluable";
+  }
+
+  return "non-code-evaluable";
+}
+
+function normalizeReviewStatus(value: unknown): "pass" | "fail" | "review" | null {
+  const token = String(value || "").trim().toLowerCase();
+  if (token === "pass" || token === "fail" || token === "review") {
+    return token;
+  }
+
+  return null;
 }
 
 function extractEvidenceMessage(result: SkillRunResult): string {
@@ -93,16 +125,67 @@ function extractEvidenceMessage(result: SkillRunResult): string {
     }
   }
 
+  const reviewResponse = result.response?.assessment;
+  if (typeof reviewResponse === "string" && reviewResponse.trim()) {
+    return reviewResponse;
+  }
+
   return "Evidence details unavailable.";
 }
 
-function extractRemediationMessage(result: SkillRunResult): string {
-  const remediation = result.response?.remediation;
+function extractEvidenceMessageFromResponse(response: Record<string, unknown> | null | undefined): string {
+  const evidence = response?.evidence;
+  if (Array.isArray(evidence) && evidence.length > 0) {
+    const first = evidence[0];
+    if (typeof first === "string") {
+      return first;
+    }
+
+    if (first && typeof first === "object") {
+      const typed = first as Record<string, unknown>;
+      if (typeof typed.detail === "string") {
+        return typed.detail;
+      }
+      if (typeof typed.finding === "string") {
+        return typed.finding;
+      }
+      if (typeof typed.issues === "string") {
+        return typed.issues;
+      }
+    }
+  }
+
+  const reviewResponse = response?.assessment;
+  if (typeof reviewResponse === "string" && reviewResponse.trim()) {
+    return reviewResponse;
+  }
+
+  const note = response?.status;
+  if (typeof note === "string" && note.trim()) {
+    return note;
+  }
+
+  return "Evidence details unavailable.";
+}
+
+function extractSupportingDocuments(response: Record<string, unknown> | null | undefined): string[] {
+  const candidate = response?.next_evidence_requests;
+  if (!Array.isArray(candidate)) {
+    return [];
+  }
+
+  return candidate
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter(Boolean);
+}
+
+function extractRemediationMessage(response: Record<string, unknown> | null | undefined): string {
+  const remediation = response?.remediation;
   if (typeof remediation === "string" && remediation.trim()) {
     return remediation;
   }
 
-  const nextEvidenceRequests = result.response?.next_evidence_requests;
+  const nextEvidenceRequests = response?.next_evidence_requests;
   if (Array.isArray(nextEvidenceRequests) && nextEvidenceRequests.length > 0) {
     const first = nextEvidenceRequests[0];
     if (typeof first === "string" && first.trim()) {
@@ -113,108 +196,162 @@ function extractRemediationMessage(result: SkillRunResult): string {
   return "Review mandate evidence and apply required remediation controls.";
 }
 
-function classifyMandate(result: SkillRunResult): MappedMandate {
-  const response = result.response || {};
-  const mandateId = String(response.mandate_id || mandateIdFromSkillName(result.skillName));
+function classifyResult(result: SkillRunResult, response: Record<string, unknown>): MappedMandate {
+  const mandateId = String(response.mandate_id || toMandateId(result.skillName));
   const code = `MANDATE-${mandateId}`;
-  const title = String(response.mandate_title || titleFromSkillName(result.skillName));
+  const title = String(response.mandate_title || toMandateTitle(result.skillName));
+  const base = {
+    code,
+    title,
+    document: `Mandate ${mandateId}`,
+    section: "Evaluation",
+    reference: result.skillName,
+    requiredSupportingDocuments: extractSupportingDocuments(response),
+    mandateType: determineMandateType(result.skillName)
+  };
 
   if (result.status !== "success") {
     return {
-      code,
-      title,
+      ...base,
       severity: "critical",
       status: "fail",
       violation: result.error || "Skill execution failed.",
       required: "Retry scan and investigate scanner/runtime failures.",
-      document: `Mandate ${mandateId}`,
-      section: "Execution",
-      reference: result.skillName
+      section: "Execution"
     };
   }
 
   const staticStatus = String(response.static_status || response.assessment || "").toLowerCase();
   if (staticStatus === "implemented") {
     return {
-      code,
-      title,
+      ...base,
       severity: "low",
       status: "pass",
       violation: "Implemented",
       required: "No action required.",
-      document: `Mandate ${mandateId}`,
-      section: "Static Evaluation",
-      reference: result.skillName
+      section: "Static Evaluation"
     };
   }
 
   if (staticStatus === "missing") {
     return {
-      code,
-      title,
+      ...base,
       severity: "high",
       status: "fail",
       violation: extractEvidenceMessage(result),
-      required: extractRemediationMessage(result),
-      document: `Mandate ${mandateId}`,
-      section: "Static Evaluation",
-      reference: result.skillName
+      required: extractRemediationMessage(response),
+      section: "Static Evaluation"
     };
   }
 
   if (staticStatus === "partial") {
     return {
-      code,
-      title,
+      ...base,
       severity: "warning",
       status: "review",
       violation: extractEvidenceMessage(result),
-      required: extractRemediationMessage(result),
-      document: `Mandate ${mandateId}`,
-      section: "Static Evaluation",
-      reference: result.skillName
+      required: extractRemediationMessage(response),
+      section: "Static Evaluation"
     };
   }
 
-  const evaluationStatus = String(response.status || "").toLowerCase();
-  if (evaluationStatus === "pass") {
+  const status = String(response.status || "").toLowerCase();
+  if (status === "pass") {
     return {
-      code,
-      title,
+      ...base,
       severity: "low",
       status: "pass",
       violation: "Passed",
       required: "No action required.",
-      document: `Mandate ${mandateId}`,
-      section: "Code Evaluation",
-      reference: result.skillName
+      section: "Code Evaluation"
     };
   }
 
-  if (evaluationStatus === "fail") {
+  if (status === "fail") {
     return {
-      code,
-      title,
+      ...base,
       severity: normalizeSeverity(String(response.severity || "high")),
       status: "fail",
       violation: extractEvidenceMessage(result),
-      required: extractRemediationMessage(result),
-      document: `Mandate ${mandateId}`,
-      section: "Code Evaluation",
-      reference: result.skillName
+      required: extractRemediationMessage(response),
+      section: "Code Evaluation"
+    };
+  }
+
+  if (status === "review") {
+    return {
+      ...base,
+      severity: "warning",
+      status: "review",
+      violation: extractEvidenceMessage(result),
+      required: extractRemediationMessage(response),
+      section: "Code Evaluation"
     };
   }
 
   return {
-    code,
-    title,
+    ...base,
     severity: "warning",
     status: "review",
     violation: extractEvidenceMessage(result),
-    required: extractRemediationMessage(result),
-    document: `Mandate ${mandateId}`,
-    section: "Evaluation",
-    reference: result.skillName
+    required: extractRemediationMessage(response),
+    section: "Evaluation"
+  };
+}
+
+function mergeMandateReview(result: SkillRunResult, review: MandateReviewRecord | undefined): MappedMandate {
+  const primaryResponse =
+    review?.reviewResult?.status === "success" && review.reviewResult.response
+      ? (review.reviewResult.response as Record<string, unknown>)
+      : (result.response as Record<string, unknown> | null) || {};
+
+  const mandate = classifyResult(result, primaryResponse);
+
+  if (!review?.reviewResult) {
+    return mandate;
+  }
+
+  const reviewStatus = normalizeReviewStatus(review.reviewResult.response?.status);
+  if (review.reviewResult.status === "failed" || reviewStatus === null) {
+    return {
+      ...mandate,
+      reviewOutcome: "review",
+      reviewedAt: review.reviewedAt,
+      reviewFeedback: review.reviewInput.feedback
+    };
+  }
+
+  if (reviewStatus === "pass") {
+    return {
+      ...mandate,
+      status: "pass",
+      severity: "low",
+      violation: extractEvidenceMessageFromResponse(review.reviewResult.response),
+      required: "Reviewed and marked as pass by operator feedback.",
+      reviewOutcome: reviewStatus,
+      reviewedAt: review.reviewedAt,
+      reviewFeedback: review.reviewInput.feedback
+    };
+  }
+
+  if (reviewStatus === "fail") {
+    return {
+      ...mandate,
+      status: "fail",
+      violation: extractEvidenceMessageFromResponse(review.reviewResult.response),
+      reviewOutcome: reviewStatus,
+      reviewedAt: review.reviewedAt,
+      reviewFeedback: review.reviewInput.feedback
+    };
+  }
+
+  return {
+    ...mandate,
+    status: "review",
+    reviewOutcome: "review",
+    reviewedAt: review.reviewedAt,
+    reviewFeedback: review.reviewInput.feedback,
+    violation: `${mandate.violation} // Manual review is required with additional feedback.`
   };
 }
 
@@ -242,25 +379,58 @@ async function readSummary(summaryPath: string): Promise<ScanSummary | null> {
   }
 }
 
-async function listSkillResultFiles(resultDir: string): Promise<string[]> {
-  const entries = await readdir(resultDir, { withFileTypes: true });
-  return entries
-    .filter((entry) => entry.isFile())
-    .map((entry) => entry.name)
-    .filter((name) => name.endsWith(".json"))
-    .filter((name) => name !== "summary.json" && name !== "run-state.json")
-    .map((name) => path.join(resultDir, name));
+function listJsonFiles(resultDir: string): Promise<string[]> {
+  return readdir(resultDir, { withFileTypes: true }).then((entries) => {
+    return entries
+      .filter((entry) => entry.isFile())
+      .map((entry) => entry.name)
+      .filter((name) => name.endsWith(".json"));
+  });
 }
 
 async function readSkillResults(resultDir: string): Promise<SkillRunResult[]> {
-  const files = await listSkillResultFiles(resultDir);
+  const fileNames = await listJsonFiles(resultDir);
+  const files = fileNames
+    .filter((name) => name !== "summary.json" && name !== "run-state.json")
+    .filter((name) => !name.endsWith(".review.json"));
+
   const results: SkillRunResult[] = [];
 
-  for (const filePath of files) {
+  for (const fileName of files) {
+    const filePath = path.join(resultDir, fileName);
     try {
       const raw = await readFile(filePath, "utf8");
       const parsed = parseJson(raw) as SkillRunResult;
       if (parsed && typeof parsed === "object" && typeof parsed.skillName === "string") {
+        results.push(parsed);
+      }
+    } catch {
+      // Ignore malformed artifacts.
+    }
+  }
+
+  return results.sort((a, b) => a.skillName.localeCompare(b.skillName));
+}
+
+async function readReviewResults(resultDir: string): Promise<MandateReviewRecord[]> {
+  const fileNames = await listJsonFiles(resultDir);
+  const files = fileNames.filter((name) => name.endsWith(".review.json"));
+
+  const results: MandateReviewRecord[] = [];
+
+  for (const fileName of files) {
+    const filePath = path.join(resultDir, fileName);
+    try {
+      const raw = await readFile(filePath, "utf8");
+      const parsed = parseJson(raw) as MandateReviewRecord;
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        typeof parsed.runId === "string" &&
+        typeof parsed.skillName === "string" &&
+        parsed.reviewResult &&
+        typeof parsed.reviewResult === "object"
+      ) {
         results.push(parsed);
       }
     } catch {
@@ -282,7 +452,14 @@ export async function loadRunSummary(resultsRoot: string, runId: string): Promis
 
   const summaryFromDisk = await readSummary(summaryPath);
   if (summaryFromDisk) {
-    return summaryFromDisk;
+    const reviewResults = summaryFromDisk.reviewResults?.length
+      ? summaryFromDisk.reviewResults
+      : await readReviewResults(resultDir);
+
+    return {
+      ...summaryFromDisk,
+      reviewResults
+    };
   }
 
   const skillResults = await readSkillResults(resultDir);
@@ -290,6 +467,7 @@ export async function loadRunSummary(resultsRoot: string, runId: string): Promis
     return null;
   }
 
+  const reviewResults = await readReviewResults(resultDir);
   const startedAt = skillResults
     .map((item) => Date.parse(item.startedAt))
     .filter(Number.isFinite)
@@ -311,7 +489,8 @@ export async function loadRunSummary(resultsRoot: string, runId: string): Promis
     failureCount: skillResults.filter((item) => item.status === "failed").length,
     startedAt: Number.isFinite(startedAt) ? new Date(startedAt).toISOString() : nowIsoFallback(),
     endedAt: Number.isFinite(endedAt) ? new Date(endedAt).toISOString() : nowIsoFallback(),
-    results: skillResults
+    results: skillResults,
+    reviewResults
   };
 }
 
@@ -320,7 +499,14 @@ function nowIsoFallback(): string {
 }
 
 export function mapSummaryToScanReport(summary: ScanSummary, runState: ScanRunState | null): Record<string, unknown> {
-  const mandates = summary.results.map(classifyMandate);
+  const reviewLookup = new Map<string, MandateReviewRecord>();
+  for (const item of summary.reviewResults || []) {
+    if (item.skillName && item.reviewResult) {
+      reviewLookup.set(item.skillName, item);
+    }
+  }
+
+  const mandates = summary.results.map((result) => mergeMandateReview(result, reviewLookup.get(result.skillName)));
 
   const failed = mandates.filter((item) => item.status === "fail");
   const passed = mandates.filter((item) => item.status === "pass");
@@ -428,6 +614,11 @@ export function mapSummaryToScanReport(summary: ScanSummary, runState: ScanRunSt
       violation: item.violation,
       required: item.required,
       reference: item.reference,
+      mandateType: item.mandateType,
+      requiredSupportingDocuments: item.requiredSupportingDocuments,
+      reviewOutcome: item.reviewOutcome,
+      reviewedAt: item.reviewedAt,
+      reviewFeedback: item.reviewFeedback,
       documentationUrl: "../compliance-codex/index.html"
     })),
     reviewMandates: review.map((item) => ({
@@ -440,6 +631,11 @@ export function mapSummaryToScanReport(summary: ScanSummary, runState: ScanRunSt
       violation: item.violation,
       required: item.required,
       reference: item.reference,
+      mandateType: item.mandateType,
+      requiredSupportingDocuments: item.requiredSupportingDocuments,
+      reviewOutcome: item.reviewOutcome,
+      reviewedAt: item.reviewedAt,
+      reviewFeedback: item.reviewFeedback,
       documentationUrl: "../compliance-codex/index.html"
     })),
     passedChecks: passed.map((item) => ({

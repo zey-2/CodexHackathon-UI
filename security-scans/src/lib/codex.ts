@@ -1,6 +1,11 @@
 import path from "node:path";
 
-import type { SkillDescriptor, SkillResponse, SkillRunResult } from "./types.js";
+import type {
+  MandateReviewResult,
+  SkillDescriptor,
+  SkillRunResult,
+  SkillResponse
+} from "./types.js";
 
 const STATIC_EVAL_SKILL_PATTERN = /-code-static-eval$/;
 const CODE_EVALUATION_SKILL_PATTERN = /-code-evaluation$/;
@@ -81,6 +86,49 @@ const SKILL_RESPONSE_SCHEMA = {
   }
 } as const;
 
+const MANDATE_REVIEW_RESPONSE_SCHEMA = {
+  type: "object",
+  additionalProperties: true,
+  required: ["mandate_id", "status", "confidence"],
+  properties: {
+    mandate_id: { type: "string" },
+    mandate_title: { type: "string" },
+    status: {
+      type: "string",
+      enum: ["pass", "fail", "review"]
+    },
+    confidence: {
+      type: "string",
+      enum: ["low", "medium", "high", "n/a"]
+    },
+    assessment: {
+      type: "string"
+    },
+    evidence: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: true
+      }
+    },
+    next_evidence_requests: {
+      type: "array",
+      items: { type: "string" }
+    },
+    remediation: {
+      type: "string"
+    },
+    next_steps: {
+      type: "array",
+      items: { type: "string" }
+    },
+    assumptions: {
+      type: "array",
+      items: { type: "string" }
+    }
+  }
+} as const;
+
 function selectOutputSchemaForSkill(skillName: string): unknown {
   if (STATIC_EVAL_SKILL_PATTERN.test(skillName)) {
     return STATIC_EVAL_RESPONSE_SCHEMA;
@@ -117,6 +165,57 @@ function buildPrompt(skill: SkillDescriptor, repoRoot: string): string {
     "",
     "Skill specification follows:",
     skill.skillMdContent
+  ].join("\n");
+}
+
+function serializeValueBlock(value: unknown): string {
+  if (!value) {
+    return "No additional context provided.";
+  }
+  if (typeof value === "string") {
+    return value.trim() || "No additional context provided.";
+  }
+  return JSON.stringify(value, null, 2);
+}
+
+function buildReviewPrompt(params: {
+  skillName: string;
+  originalResult: SkillRunResult;
+  feedback: string;
+  supportingDocuments: string[];
+  repoRoot: string;
+}): string {
+  return [
+    "You are a compliance review specialist re-evaluating an already-scanned mandate.",
+    `Mandate identifier: ${params.skillName}`,
+    `Target repository root path: ${path.resolve(params.repoRoot)}`,
+    "",
+    "Task:",
+    "1) Review the original static/code evaluation output and the operator-provided supporting artifacts.",
+    "2) Re-evaluate only whether this mandate still requires remediation based on all available input.",
+    "3) Return ONLY valid JSON using one of the required statuses: pass, fail, review.",
+    "4) If status is review, list what additional evidence is still required.",
+    "",
+    "Original mandate evaluation output:",
+    serializeValueBlock(params.originalResult.response),
+    "",
+    "User feedback:",
+    params.feedback.trim() || "No feedback provided.",
+    "",
+    "User-supplied supporting documents:",
+    params.supportingDocuments.length > 0
+      ? params.supportingDocuments.map((item) => `- ${item}`).join("\n")
+      : "None provided.",
+    "",
+    "Output schema fields:",
+    "- status: pass | fail | review",
+    "- mandate_id: same as original mandate_id if available",
+    "- assessment: concise rationale",
+    "- confidence: low|medium|high|n/a",
+    "- evidence: any evidence entries supporting the outcome",
+    "- next_evidence_requests: required documents for non-pass statuses",
+    "- remediation or next_steps: optional remediation guidance",
+    "- assumptions: optional context assumptions that affect evaluation"
   ].join("\n");
 }
 
@@ -326,8 +425,72 @@ export async function runSkillThread(params: {
   }
 }
 
+export async function runMandateReviewThread(params: {
+  client: AnyCodexClient;
+  skillName: string;
+  originalResult: SkillRunResult;
+  feedback: string;
+  supportingDocuments: string[];
+  repoRoot: string;
+  model: string;
+}): Promise<MandateReviewResult> {
+  const startedAt = new Date().toISOString();
+  let threadId: string | null = null;
+  let rawResponse: string | null = null;
+
+  try {
+    const thread = await startThreadWithFallback(params.client, params.repoRoot);
+    threadId = thread.id ?? thread.threadId ?? null;
+
+    const prompt = buildReviewPrompt({
+      skillName: params.skillName,
+      originalResult: params.originalResult,
+      feedback: params.feedback,
+      supportingDocuments: params.supportingDocuments,
+      repoRoot: params.repoRoot
+    });
+
+    const runResponse = await runThreadWithFallback(thread, prompt, params.model, MANDATE_REVIEW_RESPONSE_SCHEMA);
+    threadId = thread.id ?? thread.threadId ?? threadId;
+    rawResponse = extractTextFromUnknown(runResponse);
+    const parsed = parseJsonBlock(rawResponse);
+    const response = coerceSkillResponse(parsed);
+
+    if (typeof response.mandate_id === "string" && response.mandate_id.trim()) {
+      response.mandate_id = response.mandate_id.trim();
+    } else if (params.originalResult.response?.mandate_id) {
+      response.mandate_id = params.originalResult.response.mandate_id;
+    } else {
+      response.mandate_id = params.skillName;
+    }
+
+    return {
+      status: "success",
+      startedAt,
+      endedAt: new Date().toISOString(),
+      outputFile: null,
+      error: null,
+      response,
+      rawResponse,
+      threadId
+    };
+  } catch (error) {
+    return {
+      status: "failed",
+      startedAt,
+      endedAt: new Date().toISOString(),
+      outputFile: null,
+      error: error instanceof Error ? error.message : String(error),
+      response: null,
+      rawResponse,
+      threadId
+    };
+  }
+}
+
 export {
   CODE_EVALUATION_RESPONSE_SCHEMA,
+  MANDATE_REVIEW_RESPONSE_SCHEMA,
   SKILL_RESPONSE_SCHEMA,
   STATIC_EVAL_RESPONSE_SCHEMA
 };

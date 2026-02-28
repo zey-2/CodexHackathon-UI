@@ -1,12 +1,14 @@
 import "dotenv/config";
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { createCodexClient, runMandateReviewThread } from "./lib/codex.js";
 import { RunManager } from "./lib/run-manager.js";
 import { loadRunSummary, mapSummaryToScanReport } from "./lib/report-mapper.js";
+import type { MandateReviewRequest } from "./lib/types.js";
 
 const DEFAULT_MODEL = process.env.CODEX_MODEL || "codex-mini-latest";
 const DEFAULT_MAX_CONCURRENCY = Number(process.env.MAX_CONCURRENCY || "4");
@@ -212,6 +214,35 @@ function badMethod(res: ServerResponse): void {
   });
 }
 
+function sanitizeArtifactName(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]/g, "_").replace(/_+/g, "_");
+}
+
+function parseStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (typeof item === "string" ? item.trim() : ""))
+      .filter((item) => item.length > 0);
+  }
+
+  if (typeof value === "string") {
+    return value
+      .split(/[\n,]/g)
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+  }
+
+  return [];
+}
+
+function validateMandatoryString(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${label} is required and must be a non-empty string.`);
+  }
+
+  return value.trim();
+}
+
 const server = createServer(async (req, res) => {
   try {
     const method = req.method || "GET";
@@ -390,6 +421,88 @@ const server = createServer(async (req, res) => {
       const runState = await runManager.getRunState(resolvedRunId);
       const reportPayload = mapSummaryToScanReport(summary, runState);
       json(res, 200, reportPayload);
+      return;
+    }
+
+    if (pathname === "/api/scan/mandate-review") {
+      if (method !== "POST") {
+        badMethod(res);
+        return;
+      }
+
+      try {
+        const body = (await readJsonBody(req)) as Partial<MandateReviewRequest>;
+        const runId = validateMandatoryString(body.runId, "runId");
+        const skillName = validateMandatoryString(body.skillName, "skillName");
+        const feedback = validateMandatoryString(body.feedback, "feedback");
+        const supportingDocuments = parseStringArray(body.supportingDocuments);
+
+        const summary = await loadRunSummary(resultsRoot, runId);
+        if (!summary) {
+          json(res, 404, {
+            error: `Run not found: ${runId}`
+          });
+          return;
+        }
+
+        const targetResult = summary.results.find((result) => result.skillName === skillName);
+        if (!targetResult) {
+          json(res, 404, {
+            error: `Skill not found in run: ${skillName}`
+          });
+          return;
+        }
+
+        const runState = await runManager.getRunState(runId);
+        const reviewRepoRoot = runState?.scanPath || summary.repoPath;
+        if (!reviewRepoRoot) {
+          json(res, 400, {
+            error: "Unable to resolve repository path for this run."
+          });
+          return;
+        }
+
+        const client = await createCodexClient();
+        const reviewRunResult = await runMandateReviewThread({
+          client,
+          skillName,
+          originalResult: targetResult,
+          feedback,
+          supportingDocuments,
+          repoRoot: reviewRepoRoot,
+          model: DEFAULT_MODEL
+        });
+
+        const reviewRecord = {
+          runId,
+          skillName,
+          reviewedAt: reviewRunResult.endedAt,
+          reviewInput: {
+            feedback,
+            supportingDocuments
+          },
+          reviewResult: reviewRunResult
+        };
+
+        const resultDir = path.join(resultsRoot, runId);
+        const reviewArtifact = path.join(resultDir, `${sanitizeArtifactName(skillName)}.review.json`);
+        await writeFile(reviewArtifact, `${JSON.stringify(reviewRecord, null, 2)}\n`, "utf8");
+
+        const updatedSummary = await loadRunSummary(resultsRoot, runId);
+        const updatedRunState = await runManager.getRunState(runId);
+        const reportPayload = updatedSummary ? mapSummaryToScanReport(updatedSummary, updatedRunState) : null;
+
+        json(res, 200, {
+          runId,
+          skillName,
+          reviewRunResult,
+          updatedReport: reportPayload
+        });
+      } catch (error) {
+        json(res, mapErrorToStatus(error), {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
       return;
     }
 

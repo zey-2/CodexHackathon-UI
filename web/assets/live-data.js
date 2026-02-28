@@ -30,6 +30,12 @@
   const SCAN_CONTEXT_KEY = "neon_guardian_scan_context_v1";
   const SOURCE_TYPE_LOCAL = "local";
   const SOURCE_TYPE_GITHUB = "github";
+  const DASHBOARD_TERMINAL_LINE_LIMIT = 80;
+  const dashboardTerminalState = {
+    runId: "",
+    lines: [],
+    lastLineKey: ""
+  };
 
   initialize().catch(() => {
     // Keep static HTML as fallback if live data fails.
@@ -264,25 +270,14 @@
     }
 
     const logs = toArray(sourceData.logs);
+    const runtimeLines = getDashboardTerminalLines();
     const logsList = byId("dashboard-logs-list");
-    if (logsList && logs.length > 0) {
-      logsList.innerHTML = `${logs
-        .map((log, index) => {
-          const levelClass = getLogLevelClass(log.level);
-          const source = toUpper(log.source || "LOG");
-          const time = escapeHtml(normalizeTime(log.time));
-          const message = escapeHtml(log.message || "");
-          const rowPadding = index >= 3 ? " pt-2" : "";
-
-          return `
-            <div class="flex gap-4${rowPadding}">
-              <span class="text-text-muted shrink-0">[${time}]</span>
-              <span class="${levelClass}">${source}:</span>
-              <span class="text-text-main">${message}</span>
-            </div>
-          `;
-        })
-        .join("")}
+    if (logsList) {
+      const mergedRows = [
+        ...logs.map((log, index) => renderDashboardLogRow(log, index)),
+        ...runtimeLines.map((log, index) => renderDashboardLogRow(log, logs.length + index))
+      ];
+      logsList.innerHTML = `${mergedRows.join("")}
         <div class="flex gap-4">
           <span class="text-primary shrink-0">&gt;</span>
           <span class="text-primary w-2 h-4 bg-primary cursor-blink"></span>
@@ -547,6 +542,7 @@
           scanStatusUrl: statusUrl,
           scanReportUrl: reportUrl
         });
+        startDashboardTerminalRun(runId);
 
         setDashboardSourceStatus(`Scan ${runId} started. Polling status...`, "info");
         void pollDashboardScanStatus({
@@ -714,6 +710,14 @@
       const total = Math.max(0, Number(progress.total) || 0);
       const failed = Math.max(0, Number(progress.failed) || 0);
       const review = Math.max(0, Number(progress.review) || 0);
+      updateDashboardTerminalProgress({
+        runId,
+        state,
+        completed,
+        total,
+        failed,
+        review
+      });
 
       if (state === "queued") {
         setDashboardSourceStatus(`Scan ${runId} queued...`, "info");
@@ -736,6 +740,12 @@
           scanState: "completed"
         });
         setDashboardSourceStatus(`Scan ${runId} completed. Opening report...`, "success");
+        appendDashboardTerminalLine({
+          runId,
+          source: "SYSTEM",
+          level: "success",
+          message: `Scan ${runId} completed with ${completed}/${total} checks processed.`
+        });
         window.setTimeout(() => {
           window.location.href = reportPageUrl;
         }, 400);
@@ -748,6 +758,12 @@
           scanState: "failed"
         });
         setDashboardSourceStatus(errorMessage, "error");
+        appendDashboardTerminalLine({
+          runId,
+          source: "ALERT",
+          level: "critical",
+          message: errorMessage
+        });
         return;
       }
 
@@ -881,6 +897,132 @@
       return;
     }
     status.classList.add("text-text-muted");
+  }
+
+  function startDashboardTerminalRun(runId) {
+    const nextRunId = String(runId || "").trim();
+    if (!isFilled(nextRunId)) {
+      return;
+    }
+
+    dashboardTerminalState.runId = nextRunId;
+    dashboardTerminalState.lines = [];
+    dashboardTerminalState.lastLineKey = "";
+
+    appendDashboardTerminalLine({
+      runId: nextRunId,
+      source: "SYSTEM",
+      level: "info",
+      message: `Run ${nextRunId} initialized in terminal.`
+    });
+  }
+
+  function appendDashboardTerminalLine(entry) {
+    const runId = String(entry?.runId || "").trim();
+    if (!isFilled(runId)) {
+      return;
+    }
+
+    if (dashboardTerminalState.runId !== runId) {
+      dashboardTerminalState.runId = runId;
+      dashboardTerminalState.lines = [];
+      dashboardTerminalState.lastLineKey = "";
+    }
+
+    const source = String(entry?.source || "LOG").trim() || "LOG";
+    const level = String(entry?.level || "info").trim() || "info";
+    const message = String(entry?.message || "").trim();
+    if (!isFilled(message)) {
+      return;
+    }
+
+    const lineKey = `${runId}|${source}|${level}|${message}`;
+    if (dashboardTerminalState.lastLineKey === lineKey) {
+      return;
+    }
+
+    dashboardTerminalState.lines.push({
+      time: getTerminalClock(),
+      source,
+      level,
+      message
+    });
+    if (dashboardTerminalState.lines.length > DASHBOARD_TERMINAL_LINE_LIMIT) {
+      dashboardTerminalState.lines.shift();
+    }
+    dashboardTerminalState.lastLineKey = lineKey;
+  }
+
+  function updateDashboardTerminalProgress({ runId, state, completed, total, failed, review }) {
+    const normalizedRunId = String(runId || "").trim();
+    if (!isFilled(normalizedRunId)) {
+      return;
+    }
+
+    const safeCompleted = Math.max(0, Number(completed) || 0);
+    const safeTotal = Math.max(0, Number(total) || 0);
+    const safeFailed = Math.max(0, Number(failed) || 0);
+    const safeReview = Math.max(0, Number(review) || 0);
+
+    setText("dashboard-log-entries", `ENTRIES: ${safeCompleted.toLocaleString("en-US")}`);
+    setText("dashboard-log-errors", `ERRORS: ${safeFailed.toLocaleString("en-US")}`);
+    setText("dashboard-log-warnings", `WARNINGS: ${safeReview.toLocaleString("en-US")}`);
+
+    if (state === "queued") {
+      appendDashboardTerminalLine({
+        runId: normalizedRunId,
+        source: "SCAN",
+        level: "warning",
+        message: "Scan queued. Waiting for worker availability."
+      });
+      return;
+    }
+
+    if (state === "running" && safeTotal > 0) {
+      const percent = Math.max(0, Math.min(100, Math.round((safeCompleted / safeTotal) * 100)));
+      appendDashboardTerminalLine({
+        runId: normalizedRunId,
+        source: "SCAN",
+        level: "info",
+        message: `Progress: ${safeCompleted}/${safeTotal} checks (${percent}%), ${safeFailed} failed, ${safeReview} review`
+      });
+      return;
+    }
+
+    if (state === "running") {
+      appendDashboardTerminalLine({
+        runId: normalizedRunId,
+        source: "SCAN",
+        level: "info",
+        message: "Scan running; awaiting progress metrics."
+      });
+    }
+  }
+
+  function getDashboardTerminalLines() {
+    return dashboardTerminalState.lines;
+  }
+
+  function renderDashboardLogRow(log, index) {
+    const levelClass = getLogLevelClass(log?.level);
+    const source = toUpper(log?.source || "LOG");
+    const time = escapeHtml(normalizeTime(log?.time));
+    const message = escapeHtml(log?.message || "");
+    const rowPadding = index >= 3 ? " pt-2" : "";
+
+    return `
+      <div class="flex gap-4${rowPadding}">
+        <span class="text-text-muted shrink-0">[${time}]</span>
+        <span class="${levelClass}">${source}:</span>
+        <span class="text-text-main">${message}</span>
+      </div>
+    `;
+  }
+
+  function getTerminalClock() {
+    const now = new Date();
+    const pad2 = (value) => String(value).padStart(2, "0");
+    return `${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}`;
   }
 
   function firstFilled(...values) {
